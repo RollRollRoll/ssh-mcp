@@ -40,7 +40,7 @@
   - 启动入口只接受配置定位参数/环境变量，不提供主机、命令或传输 CLI。
 - 验证方式：`npm ci && npm run build && npm run typecheck && npm test -- tests/contract/server-bootstrap.test.ts`。
 - 覆盖：设计 3.1、3.2、4、5.1 `Bootstrap/StdioMcpServer`；规格 Requirement「MCP 行为与输入校验」的能力发现基础；MUST NOT「独立 CLI、HTTP API、网页或桌面管理界面」。
-- [ ] 完成
+- [x] 完成
 
 ### Task 2：交付严格配置加载与登记主机发现
 
