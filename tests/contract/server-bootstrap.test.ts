@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -7,6 +10,23 @@ import { createServer, resolveConfigPath } from "../../src/server.js";
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const children: ReturnType<typeof spawn>[] = [];
+const configPath = join(mkdtempSync(join(tmpdir(), "ssh-mcp-")), "config.yml");
+
+writeFileSync(configPath, `
+version: 1
+trustStore: /var/lib/ssh-mcp/trust.json
+localRoots: [/workspace]
+hosts:
+  - alias: test-host
+    environment: test
+    platform: linux
+    host: 192.0.2.10
+    port: 22
+    username: developer
+    auth: { type: pageant }
+    shell: { type: posix, command: /bin/sh }
+    remoteRoots: [/srv/project]
+`);
 
 afterEach(() => {
   for (const child of children) {
@@ -26,12 +46,12 @@ describe("MCP stdio 启动入口", () => {
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
   });
 
-  it("完成初始化与空工具列表请求，stdout 仅输出 MCP 帧", async () => {
+  it("成功加载配置后完成初始化并仅注册登记主机工具，stdout 仅输出 MCP 帧", async () => {
     const child = spawn(process.execPath, ["dist/index.js"], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        SSH_MCP_CONFIG: "/tmp/ssh-mcp.yml"
+        SSH_MCP_CONFIG: configPath
       },
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -69,7 +89,7 @@ describe("MCP stdio 启动入口", () => {
     expect(toolsList).toMatchObject({
       jsonrpc: "2.0",
       id: 2,
-      result: { tools: [] }
+      result: { tools: [expect.objectContaining({ name: "hosts_list" })] }
     });
   });
 

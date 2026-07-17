@@ -57,7 +57,7 @@
   - 不支持的配置版本和损坏配置阻止服务进入可操作状态。
 - 验证方式：`npm test -- tests/unit/config.test.ts tests/contract/hosts-list.test.ts && npm run typecheck`。
 - 覆盖：设计 3.6、5.1 `ConfigLoader/HostRegistry`、6.1；规格 Requirement「登记主机边界」「认证与敏感信息隔离」的配置边界；MUST NOT 1、2、3、4、6、7、12、13 的前置约束。
-- [ ] 完成
+- [x] 完成
 
 ### Task 3：建立不可变操作意图、审批、错误、脱敏与日志契约
 
