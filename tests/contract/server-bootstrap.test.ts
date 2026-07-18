@@ -94,7 +94,8 @@ describe("MCP stdio 启动入口", () => {
           expect.objectContaining({ name: "hosts_list" }),
           expect.objectContaining({ name: "operation_get" }),
           expect.objectContaining({ name: "operation_cancel" }),
-          expect.objectContaining({ name: "command_run" })
+          expect.objectContaining({ name: "command_run" }),
+          expect.objectContaining({ name: "profile_run" })
         ])
       }
     });

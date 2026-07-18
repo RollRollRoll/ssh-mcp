@@ -144,7 +144,7 @@
   - Profile 仍沿用 Task 6 的平台、输出、超时和错误契约。
 - 验证方式：`npm test -- tests/unit/policy.test.ts tests/contract/profile-run.test.ts && npm run typecheck`。
 - 覆盖：设计 3.5、5.1 `PolicyEngine/CommandCompiler`、6.1 lowRiskProfiles、7.3；规格 Requirement「操作授权」「跨平台行为」；MUST NOT 2、6、10、13。
-- [ ] 完成
+- [x] 完成
 
 ### Task 8：交付持久 PTY 交互会话
 

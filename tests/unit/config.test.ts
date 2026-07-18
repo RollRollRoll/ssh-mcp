@@ -104,4 +104,157 @@ lowRiskProfiles:
     expect(loader.load()).toBe(loader.load());
     expect(reads).toBe(1);
   });
+
+  it("接受启动时冻结的结构化低风险 Profile 与整数范围", () => {
+    const config = loadConfigFromYaml(`${baseConfig}
+lowRiskProfiles:
+  - id: disk-usage
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/du
+    fixedArgs: [-s]
+    parameters:
+      - type: remotePath
+        name: path
+        required: true
+      - type: integer
+        name: depth
+        required: false
+        minimum: 0
+        maximum: 3
+`);
+    expect(config.lowRiskProfiles).toHaveLength(1);
+    expect(Object.isFrozen(config.lowRiskProfiles[0])).toBe(true);
+  });
+
+  it("Windows Profile 必须显式声明 Cmdlet 或原生命令语义，Linux 不接受该字段", () => {
+    const windowsConfig = baseConfig
+      .replace("alias: linux-dev", "alias: windows-dev")
+      .replace("platform: linux", "platform: windows")
+      .replace("type: posix", "type: powershell")
+      .replace("command: /bin/sh", "command: powershell.exe")
+      .replace("- /srv/project", "- C:\\\\Work");
+    const windowsProfile = `
+  - id: inspect-temp
+    hostAliases: [windows-dev]
+    platform: windows
+    commandType: cmdlet
+    executable: Get-Item
+    fixedArgs: [-Force]`;
+
+    expect(loadConfigFromYaml(`${windowsConfig}\nlowRiskProfiles:${windowsProfile}\n`).lowRiskProfiles[0])
+      .toMatchObject({ commandType: "cmdlet" });
+    expect(() => loadConfigFromYaml(`${windowsConfig}\nlowRiskProfiles:${windowsProfile.replace("    commandType: cmdlet\n", "")}\n`)).toThrow(/配置/);
+    expect(() => loadConfigFromYaml(`${baseConfig}\nlowRiskProfiles:${windowsProfile.replace("windows-dev", "linux-dev")}\n`)).toThrow(/配置/);
+    expect(() => loadConfigFromYaml(`${baseConfig}\nlowRiskProfiles:\n  - id: invalid-linux-command-type\n    hostAliases: [linux-dev]\n    platform: linux\n    commandType: cmdlet\n    executable: /usr/bin/true\n`)).toThrow(/配置/);
+  });
+
+  it("启动时拒绝 Profile 与登记主机的平台或 Shell 组合不一致", () => {
+    const windowsHost = `
+  - alias: windows-dev
+    environment: test
+    platform: windows
+    host: 192.0.2.20
+    port: 22
+    username: tester
+    auth:
+      type: pageant
+    shell:
+      type: powershell
+      command: powershell.exe
+    remoteRoots:
+      - C:\\\\Work`;
+    const windowsProfileOnLinux = `
+  - id: invalid-windows-profile
+    hostAliases: [linux-dev]
+    platform: windows
+    commandType: cmdlet
+    executable: Get-Item`;
+    const mixedAliases = `
+  - id: invalid-mixed-profile
+    hostAliases: [linux-dev, windows-dev]
+    platform: linux
+    executable: /usr/bin/true`;
+
+    expect(() => loadConfigFromYaml(`${baseConfig}\nlowRiskProfiles:${windowsProfileOnLinux}\n`)).toThrow(/配置/);
+    expect(() => loadConfigFromYaml(`${baseConfig}\n${windowsHost}\nlowRiskProfiles:${mixedAliases}\n`)).toThrow(/配置/);
+  });
+
+  it("拒绝无法无歧义表达的 Windows Cmdlet 固定参数", () => {
+    const windowsConfig = baseConfig
+      .replace("alias: linux-dev", "alias: windows-dev")
+      .replace("platform: linux", "platform: windows")
+      .replace("type: posix", "type: powershell")
+      .replace("command: /bin/sh", "command: powershell.exe")
+      .replace("- /srv/project", "- C:\\\\Work");
+    expect(() => loadConfigFromYaml(`${windowsConfig}
+lowRiskProfiles:
+  - id: invalid-cmdlet-arguments
+    hostAliases: [windows-dev]
+    platform: windows
+    commandType: cmdlet
+    executable: Get-Item
+    fixedArgs: ["-Force:$false"]
+`)).toThrow(/配置/);
+  });
+
+  it.each([
+    ["重复 Profile ID", `
+  - id: duplicate
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true
+  - id: duplicate
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true`],
+    ["未登记 Profile 主机", `
+  - id: missing-host
+    hostAliases: [missing]
+    platform: linux
+    executable: /usr/bin/true`],
+    ["重复 Profile 主机", `
+  - id: duplicate-host
+    hostAliases: [linux-dev, linux-dev]
+    platform: linux
+    executable: /usr/bin/true`],
+    ["Profile 主机通配符", `
+  - id: wildcard-host
+    hostAliases: [linux-*]
+    platform: linux
+    executable: /usr/bin/true`],
+    ["不安全参数名", `
+  - id: unsafe-name
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true
+    parameters: [{ type: boolean, name: x'; whoami, required: false }]`],
+    ["重复参数名", `
+  - id: duplicate-parameter
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true
+    parameters:
+      - { type: boolean, name: flag, required: false }
+      - { type: integer, name: flag, required: false }`],
+    ["整数范围反转", `
+  - id: invalid-range
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true
+    parameters: [{ type: integer, name: depth, required: false, minimum: 4, maximum: 1 }]`],
+    ["可执行文件换行", `
+  - id: unsafe-command
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: "/usr/bin/true\\nwhoami"`],
+    ["固定参数控制字符", `
+  - id: unsafe-argument
+    hostAliases: [linux-dev]
+    platform: linux
+    executable: /usr/bin/true
+    fixedArgs: ["--safe\\nwhoami"]`]
+  ])("拒绝%s", (_name, profiles) => {
+    expect(() => loadConfigFromYaml(`${baseConfig}\nlowRiskProfiles:${profiles}\n`)).toThrow(/配置/);
+  });
 });

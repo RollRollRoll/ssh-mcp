@@ -74,21 +74,78 @@ const LimitsSchema = z.object({
   resultRetentionMs: z.number().int().positive().max(3_600_000).default(900_000)
 }).strict();
 
+const profileTextMessage = "不得包含 NUL、换行或控制字符";
+const safeProfileText = z.string().refine((value) => !/[\u0000-\u001F\u007F]/.test(value), profileTextMessage);
+const profileText = z.string().min(1).refine((value) => !/[\u0000-\u001F\u007F]/.test(value), profileTextMessage);
+const profileIdentifier = profileText.refine((value) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(value), "必须是安全标识符");
+
 const LowRiskParameterSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("enum"), name: z.string().min(1), required: z.boolean(), values: z.array(z.string()).min(1) }).strict(),
-  z.object({ type: z.literal("integer"), name: z.string().min(1), required: z.boolean() }).strict(),
-  z.object({ type: z.literal("boolean"), name: z.string().min(1), required: z.boolean() }).strict(),
-  z.object({ type: z.literal("remotePath"), name: z.string().min(1), required: z.boolean() }).strict()
+  z.object({ type: z.literal("enum"), name: profileIdentifier, required: z.boolean(), values: z.array(safeProfileText).min(1) }).strict(),
+  z.object({ type: z.literal("integer"), name: profileIdentifier, required: z.boolean(), minimum: z.number().int().safe().optional(), maximum: z.number().int().safe().optional() }).strict(),
+  z.object({ type: z.literal("boolean"), name: profileIdentifier, required: z.boolean() }).strict(),
+  z.object({ type: z.literal("remotePath"), name: profileIdentifier, required: z.boolean() }).strict()
 ]);
 
-const LowRiskProfileSchema = z.object({
-  id: z.string().min(1),
-  hostAliases: z.array(z.string().min(1).refine((alias) => !alias.includes("*"), "不允许通配符")).min(1),
-  platform: z.enum(["linux", "windows"]),
-  executable: z.string().min(1),
-  fixedArgs: z.array(z.string()).default([]),
+const LowRiskProfileFields = {
+  id: profileText,
+  hostAliases: z.array(profileText.refine((alias) => !alias.includes("*"), "不允许通配符")).min(1),
+  executable: profileText,
+  fixedArgs: z.array(safeProfileText).default([]),
   parameters: z.array(LowRiskParameterSchema).default([])
+};
+
+function validateProfile(profile: {
+  hostAliases: readonly string[];
+  parameters: readonly z.infer<typeof LowRiskParameterSchema>[];
+}, context: z.RefinementCtx): void {
+  const aliases = new Set<string>();
+  for (const [index, alias] of profile.hostAliases.entries()) {
+    if (aliases.has(alias)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["hostAliases", index], message: "Profile 主机别名必须唯一" });
+    aliases.add(alias);
+  }
+  const parameterNames = new Set<string>();
+  for (const [index, parameter] of profile.parameters.entries()) {
+    if (parameterNames.has(parameter.name)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["parameters", index, "name"], message: "Profile 参数名必须唯一" });
+    parameterNames.add(parameter.name);
+    if (parameter.type === "integer" && parameter.minimum !== undefined && parameter.maximum !== undefined && parameter.minimum > parameter.maximum) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["parameters", index, "minimum"], message: "minimum 不能大于 maximum" });
+    }
+    if (parameter.type === "enum" && new Set(parameter.values).size !== parameter.values.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["parameters", index, "values"], message: "枚举值必须唯一" });
+    }
+  }
+}
+
+const powerShellParameterToken = /^-[A-Za-z][A-Za-z0-9-]*$/;
+
+const LinuxLowRiskProfileSchema = z.object({
+  ...LowRiskProfileFields,
+  platform: z.literal("linux")
 }).strict();
+
+const WindowsLowRiskProfileSchema = z.object({
+  ...LowRiskProfileFields,
+  platform: z.literal("windows"),
+  commandType: z.enum(["cmdlet", "native"])
+}).strict();
+
+const LowRiskProfileSchema = z.discriminatedUnion("platform", [
+  LinuxLowRiskProfileSchema,
+  WindowsLowRiskProfileSchema
+]).superRefine((profile, context) => {
+  validateProfile(profile, context);
+  if (profile.platform !== "windows" || profile.commandType !== "cmdlet") return;
+
+  for (const [index, argument] of profile.fixedArgs.entries()) {
+    if (argument.startsWith("-") && !powerShellParameterToken.test(argument)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["fixedArgs", index],
+        message: "Windows Cmdlet 的固定参数必须是无值的 -Name 形式；值必须作为独立固定参数"
+      });
+    }
+  }
+});
 
 export const ConfigSchema = z.object({
   version: z.literal(1),
@@ -107,12 +164,12 @@ export const ConfigSchema = z.object({
   hosts: z.array(HostSchema).min(1).max(10),
   lowRiskProfiles: z.array(LowRiskProfileSchema).default([])
 }).strict().superRefine((config, context) => {
-  const aliases = new Set<string>();
+  const hostsByAlias = new Map<string, HostConfig>();
   for (const [index, host] of config.hosts.entries()) {
-    if (aliases.has(host.alias)) {
+    if (hostsByAlias.has(host.alias)) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["hosts", index, "alias"], message: "主机别名必须唯一" });
     }
-    aliases.add(host.alias);
+    hostsByAlias.set(host.alias, host);
   }
 
   const profileIds = new Set<string>();
@@ -122,8 +179,17 @@ export const ConfigSchema = z.object({
     }
     profileIds.add(profile.id);
     for (const alias of profile.hostAliases) {
-      if (!aliases.has(alias)) {
+      const host = hostsByAlias.get(alias);
+      if (host === undefined) {
         context.addIssue({ code: z.ZodIssueCode.custom, path: ["lowRiskProfiles", index, "hostAliases"], message: "低风险规则只能引用登记主机" });
+        continue;
+      }
+      const expectedShell = profile.platform === "linux" ? "posix" : "powershell";
+      if (host.platform !== profile.platform) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["lowRiskProfiles", index, "hostAliases"], message: "低风险规则主机平台必须与规则平台一致" });
+      }
+      if (host.shell.type !== expectedShell) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["lowRiskProfiles", index, "hostAliases"], message: "低风险规则主机 Shell 必须与规则平台一致" });
       }
     }
   }
@@ -131,4 +197,6 @@ export const ConfigSchema = z.object({
 
 export type SshMcpConfig = z.infer<typeof ConfigSchema>;
 export type HostConfig = z.infer<typeof HostSchema>;
+export type LowRiskProfile = SshMcpConfig["lowRiskProfiles"][number];
+export type LowRiskParameter = LowRiskProfile["parameters"][number];
 export type ConnectionState = "connected" | "disconnected" | "unknown";

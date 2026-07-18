@@ -12,6 +12,8 @@ import { TrustStore } from "./ssh/trust-store.js";
 import { registerCommandRunTool, type CommandRunDependencies } from "./tools/command-run.js";
 import { registerHostsListTool } from "./tools/hosts-list.js";
 import { registerOperationControlTools } from "./tools/operation-control.js";
+import { registerProfileRunTool, type ProfileRunDependencies } from "./tools/profile-run.js";
+import { PolicyEngine } from "./policy/policy-engine.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -32,13 +34,18 @@ export function resolveConfigPath(
   return args[1];
 }
 
-export function createServer(registry?: HostRegistry, operationManager?: OperationManager, commandRun?: CommandRunDependencies): McpServer {
+export function createServer(
+  registry?: HostRegistry,
+  operationManager?: OperationManager,
+  commandRun?: CommandRunDependencies,
+  profileRun?: ProfileRunDependencies
+): McpServer {
   const server = new McpServer({
     name: "ssh-mcp",
     version: "0.1.0"
   });
 
-  registerTools(server, registry, operationManager, commandRun);
+  registerTools(server, registry, operationManager, commandRun, profileRun);
   return server;
 }
 
@@ -63,16 +70,24 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
       timeoutMs: 120_000
     }, signal)).action
   };
+  const runner = new CommandRunner(new SshAdapter(new StrictHostKeyVerifier(new TrustStore(config.trustStore), confirmation)), manager);
   registerCommandRunTool(server, {
     registry,
     approval: new ApprovalService(approvalClient),
-    runner: new CommandRunner(new SshAdapter(new StrictHostKeyVerifier(new TrustStore(config.trustStore), confirmation)), manager)
+    runner
   });
+  registerProfileRunTool(server, { registry, runner, policy: new PolicyEngine(config.lowRiskProfiles) });
 
   await server.connect(new StdioServerTransport());
 }
 
-export function registerTools(server: McpServer, registry?: HostRegistry, operationManager?: OperationManager, commandRun?: CommandRunDependencies): void {
+export function registerTools(
+  server: McpServer,
+  registry?: HostRegistry,
+  operationManager?: OperationManager,
+  commandRun?: CommandRunDependencies,
+  profileRun?: ProfileRunDependencies
+): void {
   // 使用高层 API 初始化工具 handler；移除后仍保留 T1 所需的空工具列表。
   const bootstrapRegistration = server.registerTool(
     "bootstrap-tool-registry",
@@ -90,5 +105,8 @@ export function registerTools(server: McpServer, registry?: HostRegistry, operat
   }
   if (commandRun !== undefined) {
     registerCommandRunTool(server, commandRun);
+  }
+  if (profileRun !== undefined) {
+    registerProfileRunTool(server, profileRun);
   }
 }

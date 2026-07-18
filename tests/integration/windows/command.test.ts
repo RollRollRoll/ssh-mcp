@@ -3,6 +3,8 @@ import { buildCommand } from "../../../src/commands/command-builder.js";
 import { CommandRunner } from "../../../src/commands/command-runner.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
+import { ProfileCompiler } from "../../../src/policy/profile-compiler.js";
+import { PolicyEngine } from "../../../src/policy/policy-engine.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
 import { SshAdapter } from "../../../src/ssh/ssh-adapter.js";
 import { TrustStore } from "../../../src/ssh/trust-store.js";
@@ -40,6 +42,48 @@ describe("Windows OpenSSH command", () => {
     expect(manager.get(operation.operationId).frames).toEqual(expect.arrayContaining([
       expect.objectContaining({ stream: "stdout", encoding: "utf8", data: expect.stringContaining("中文") })
     ]));
+  });
+
+  it.skipIf(!windowsIntegrationAvailable())("真实 PowerShell Cmdlet 保持命名参数和 false switch 语义", async () => {
+    let operationSequence = 0;
+    const manager = new OperationManager({ idFactory: () => `windows-profile-${Date.now()}-${++operationSequence}` });
+    const confirmation: TrustConfirmation = { supportsForm: () => true, confirm: async () => "accept" };
+    const runner = new CommandRunner(
+      new SshAdapter(new StrictHostKeyVerifier(new TrustStore(requiredEnv("SSH_MCP_WINDOWS_TRUST_STORE")), confirmation)),
+      manager
+    );
+    const host = windowsIntegrationHost();
+    const fixturePath = `C:\\Temp\\ssh-mcp-profile-${process.pid}-${Date.now()}`;
+
+    try {
+      await runToTerminal(runner, manager, host,
+        `New-Item -ItemType Directory -LiteralPath '${fixturePath}' -Force | Out-Null; New-Item -ItemType File -LiteralPath '${fixturePath}\\visible.txt' -Force | Out-Null; $hidden = New-Item -ItemType File -LiteralPath '${fixturePath}\\hidden.txt' -Force; $hidden.Attributes = $hidden.Attributes -bor [IO.FileAttributes]::Hidden`
+      );
+
+      const decision = new PolicyEngine([{
+        id: "list-fixture",
+        hostAliases: [host.alias],
+        platform: "windows",
+        commandType: "cmdlet",
+        executable: "Get-ChildItem",
+        parameters: [
+          { type: "remotePath", name: "LiteralPath", required: true },
+          { type: "boolean", name: "Force", required: true }
+        ]
+      }]).evaluate({ profileId: "list-fixture", host, parameters: { LiteralPath: fixturePath, Force: false } });
+      expect(decision.matched).toBe(true);
+      if (!decision.matched) return;
+
+      const operation = runner.start(host, new ProfileCompiler().compile(decision.match));
+      await waitForTerminal(manager, operation.operationId);
+      const snapshot = manager.get(operation.operationId);
+      expect(snapshot).toMatchObject({ state: "completed", result: { exitCode: 0 } });
+      const output = snapshot.frames.map((frame) => frame.data).join("");
+      expect(output).toContain("visible.txt");
+      expect(output).not.toContain("hidden.txt");
+    } finally {
+      await runToTerminal(runner, manager, host, `Remove-Item -LiteralPath '${fixturePath}' -Recurse -Force -ErrorAction SilentlyContinue`);
+    }
   });
 });
 
@@ -81,4 +125,10 @@ async function waitForTerminal(manager: OperationManager, operationId: string): 
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("Windows OpenSSH 命令未在期限内结束");
+}
+
+async function runToTerminal(runner: CommandRunner, manager: OperationManager, host: HostConfig, command: string): Promise<void> {
+  const operation = runner.start(host, command);
+  await waitForTerminal(manager, operation.operationId);
+  expect(manager.get(operation.operationId)).toMatchObject({ state: "completed", result: { exitCode: 0 } });
 }
