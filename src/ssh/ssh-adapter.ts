@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
-import { Client, type AuthenticationType, type ConnectConfig } from "ssh2";
+import { Client, type AuthenticationType, type ConnectConfig, type SFTPWrapper, type Stats } from "ssh2";
+import type { Readable, Writable } from "node:stream";
 import type { HostConfig } from "../config/schema.js";
 import { ErrorCodes, type ErrorCode } from "../errors/error-codes.js";
 import type { HostKeyTarget, HostKeyVerificationContext } from "./host-key.js";
@@ -26,6 +27,7 @@ export interface SshClientLike extends ProbeClient {
     window: { term: string; cols: number; rows: number; width: number; height: number },
     callback: (error: Error | undefined, channel: ProbeChannel) => void
   ): this;
+  sftp?(callback: (error: Error | undefined, sftp: SFTPWrapper) => void): this;
   once(event: "ready", listener: () => void): this;
   on(event: "error", listener: (error: Error & { level?: string; code?: string }) => void): this;
   once(event: "close", listener: () => void): this;
@@ -52,6 +54,26 @@ export interface SshConnection {
   ): void;
   close(): void;
   onClose?(listener: () => void): void;
+  openSftp?(callback: (error: Error | undefined, sftp: SftpTransferSession) => void): void;
+}
+
+export interface SftpTransferStat {
+  readonly kind: "file" | "directory" | "symlink";
+  readonly id: string;
+  readonly size: number;
+}
+
+export interface SftpTransferSession {
+  lstat(path: string): Promise<SftpTransferStat>;
+  realpath(path: string): Promise<string>;
+  createReadStream(path: string): Readable;
+  createWriteStream(path: string): Writable;
+  readonly supportsAtomicReplace: boolean;
+  readonly supportsHardlink: boolean;
+  atomicReplace(path: string, target: string): Promise<void>;
+  hardlink(path: string, target: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+  close(): void;
 }
 
 export class SshAdapterError extends Error {
@@ -224,7 +246,17 @@ export class SshAdapter {
               client.exec(command, { pty: { term: "xterm-256color", cols: columns, rows, width: 0, height: 0 } }, callback);
             },
             close: () => { client.end(); },
-            onClose: (listener) => { client.once("close", listener); }
+            onClose: (listener) => { client.once("close", listener); },
+            openSftp: (callback) => {
+              if (client.sftp === undefined) {
+                callback(new Error("SFTP 不可用"), undefined as never);
+                return;
+              }
+              client.sftp((error, sftp) => {
+                if (error !== undefined) { callback(error, undefined as never); return; }
+                callback(undefined, adaptSftp(sftp));
+              });
+            }
           });
         }, fail);
       });
@@ -264,6 +296,37 @@ export class SshAdapter {
       throw new SshAdapterError(ErrorCodes.AUTH_UNAVAILABLE, undefined, { cause: error });
     }
   }
+}
+
+function adaptSftp(sftp: SFTPWrapper): SftpTransferSession {
+  const extensions = (sftp as unknown as { _extensions?: Readonly<Record<string, string>> })._extensions ?? {};
+  return {
+    lstat: async (target) => await callbackValue<Stats>((callback) => sftp.lstat(target, callback)).then(toTransferStat),
+    realpath: async (target) => await callbackValue<string>((callback) => sftp.realpath(target, callback)),
+    createReadStream: (target) => sftp.createReadStream(target, { flags: "r", autoClose: true }),
+    createWriteStream: (target) => sftp.createWriteStream(target, { flags: "wx", autoClose: true }),
+    supportsAtomicReplace: extensions["posix-rename@openssh.com"] === "1",
+    supportsHardlink: extensions["hardlink@openssh.com"] === "1",
+    atomicReplace: async (source, target) => await callbackVoid((callback) => sftp.ext_openssh_rename(source, target, callback)),
+    hardlink: async (source, target) => await callbackVoid((callback) => sftp.ext_openssh_hardlink(source, target, callback)),
+    unlink: async (target) => await callbackVoid((callback) => sftp.unlink(target, callback)),
+    close: () => { sftp.end(); }
+  };
+}
+
+function toTransferStat(status: Stats): SftpTransferStat {
+  const kind = status.isSymbolicLink() ? "symlink" : status.isFile() ? "file" : status.isDirectory() ? "directory" : undefined;
+  if (kind === undefined || !Number.isSafeInteger(status.size) || status.size < 0) throw new Error("SFTP 状态不可靠");
+  const values = [status.mode, status.uid, status.gid, status.size, status.mtime];
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0)) throw new Error("SFTP 身份不可靠");
+  return { kind, size: status.size, id: values.map((value) => value.toString(16)).join(":") };
+}
+
+async function callbackValue<T>(invoke: (callback: (error: Error | undefined, value: T) => void) => void): Promise<T> {
+  return await new Promise<T>((resolve, reject) => invoke((error, value) => error === undefined ? resolve(value) : reject(error)));
+}
+async function callbackVoid(invoke: (callback: (error?: Error | null) => void) => void): Promise<void> {
+  await new Promise<void>((resolve, reject) => invoke((error) => error == null ? resolve() : reject(error)));
 }
 
 function quotePosix(value: string): string {

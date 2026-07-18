@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import type { Readable } from "node:stream";
 import { lstat, open, realpath } from "node:fs/promises";
 import { ErrorCodes } from "../errors/error-codes.js";
 import { PathGuardError, type LexicalPathHandle, type PathPlatform, lexicalPathHandle, pathSegments } from "./path-guard.js";
@@ -12,11 +13,13 @@ export interface PathStat {
   isFile(): boolean;
   readonly dev?: number;
   readonly ino?: number;
+  readonly size?: number;
 }
 
 export interface LocalOpenFile {
   stat(): Promise<PathStat>;
   close(): Promise<void>;
+  createReadStream?(options?: { autoClose?: boolean }): Readable;
 }
 
 export interface LocalFileSystem {

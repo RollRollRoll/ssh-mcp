@@ -66,6 +66,19 @@ describe("SecretRedactor", () => {
     }
   });
 
+  it("最终目标提交证据只保留严格三态，未知提交结果可安全关联", () => {
+    const redactor = new SecretRedactor();
+    expect(redactor.redact({
+      finalTargetCommit: "unknown",
+      commitOutcome: "unknown",
+      finalTargetCommitted: false
+    })).toEqual({ finalTargetCommit: "unknown", commitOutcome: "unknown" });
+    expect(redactor.redact({
+      finalTargetCommit: "maybe",
+      commitOutcome: "committed"
+    })).toEqual({});
+  });
+
   it.each([
     ["嵌套 settings", "settings={auth:{token:settings-token-nested}}", "settings-token-nested"],
     ["带空格的 identityFile", "identityFile = /Users/dev/.ssh/identity file", "/Users/dev/.ssh/identity file"],

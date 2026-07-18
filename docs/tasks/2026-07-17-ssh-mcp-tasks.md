@@ -198,7 +198,7 @@
   - 无续传、chmod/chown/utimes 或符号链接复制调用。
 - 验证方式：`npm test -- tests/unit/file-transfer.test.ts tests/contract/file-transfer-tools.test.ts && npm run test:integration:linux -- file-transfer`；Windows 环境执行对应脚本。
 - 覆盖：设计 5.1 `TransferService`、7.9–7.10、9.6、10；规格 Requirement「操作授权」「长任务、超时与取消」「文件与目录传输」「结果与错误契约」；MUST NOT 9、10。
-- [ ] 完成
+- [x] 完成
 
 ### Task 11：交付递归目录传输与逐项部分失败
 

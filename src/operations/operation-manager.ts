@@ -192,6 +192,15 @@ export class OperationManager {
     }
   }
 
+  /** 长操作可在运行期间发布结构化进度；不会改变状态或输出游标。 */
+  public updateResult(id: string, result: Readonly<Record<string, unknown>>): OperationSnapshot {
+    const record = this.record(id);
+    if (record.machine.state === "running") {
+      record.result = Object.freeze({ ...result });
+    }
+    return this.snapshot(record);
+  }
+
   public get(id: string, cursor = 0, maxBytes = DEFAULT_OUTPUT_READ_BYTES): OperationGetResult {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_OUTPUT_READ_BYTES) {
       throw this.error(ErrorCodes.INVALID_ARGUMENT, "failed", false, "none", id);

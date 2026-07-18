@@ -66,6 +66,9 @@ export interface LogContext {
 
 const safeDetailReasons = new Set(["cancel", "cancelled", "disconnected", "timeout"]);
 const safeTimeoutKinds = new Set(["connect", "command", "session", "transfer", "approval"]);
+const safeTemporaryCleanupStates = new Set(["not_needed", "removed", "failed", "unknown"]);
+const safeFinalTargetCommitStates = new Set(["not_committed", "committed", "unknown"]);
+const safeCommitOutcomes = new Set(["unknown"]);
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const logEventValues = new Set<unknown>(Object.values(LogEvents));
 const logStateValues = new Set<unknown>(Object.values(LogStates));
@@ -87,6 +90,15 @@ export class SecretRedactor {
       }
       if (key === "digest" && typeof detail === "string" && sha256Pattern.test(detail)) {
         details.digest = detail;
+      }
+      if (key === "temporaryCleanup" && typeof detail === "string" && safeTemporaryCleanupStates.has(detail)) {
+        details.temporaryCleanup = detail;
+      }
+      if (key === "finalTargetCommit" && typeof detail === "string" && safeFinalTargetCommitStates.has(detail)) {
+        details.finalTargetCommit = detail;
+      }
+      if (key === "commitOutcome" && typeof detail === "string" && safeCommitOutcomes.has(detail)) {
+        details.commitOutcome = detail;
       }
     }
     return details;

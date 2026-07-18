@@ -10,10 +10,7 @@ const OperationGetInputSchema = z.object({
 }).strict();
 const OperationCancelInputSchema = z.object({ operationId: OperationIdSchema }).strict();
 
-const ErrorDetailsSchema = z.object({
-  reason: z.enum(["cancel", "timeout"]),
-  timeoutKind: z.enum(["connect", "command", "session", "transfer", "approval"]).optional()
-}).strict();
+const ErrorDetailsSchema = z.record(z.unknown());
 const ErrorSchema = z.object({
   error: z.object({
     code: z.string(),
@@ -22,6 +19,8 @@ const ErrorSchema = z.object({
     retriable: z.boolean(),
     sideEffects: z.enum(["none", "possible", "partial", "confirmed"]),
     operationId: z.string().optional(),
+    host: z.string().optional(),
+    sessionId: z.string().optional(),
     details: ErrorDetailsSchema.optional()
   }).strict()
 }).strict();
