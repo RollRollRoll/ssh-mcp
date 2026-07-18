@@ -179,7 +179,7 @@
   - 每个文件打开前重新校验；检测到 TOCTOU 变化时停止且不访问越界目标。
 - 验证方式：`npm test -- tests/unit/path-guards.test.ts && npm run typecheck`；Windows 环境执行 `npm run test:integration:windows -- path-guard`。
 - 覆盖：设计 5.1 `PathGuard`、9.5、风险 2/3；规格 Requirement「文件与目录传输」的越界/链接场景、「跨平台行为」；MUST NOT 9、13。
-- [ ] 完成
+- [x] 完成
 
 ### Task 10：交付单文件上传与下载
 
