@@ -64,7 +64,8 @@ export interface LogContext {
   readonly details?: Readonly<Record<string, unknown>>;
 }
 
-const safeDetailReasons = new Set(["cancelled", "disconnected"]);
+const safeDetailReasons = new Set(["cancel", "cancelled", "disconnected", "timeout"]);
+const safeTimeoutKinds = new Set(["connect", "command", "session", "transfer", "approval"]);
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const logEventValues = new Set<unknown>(Object.values(LogEvents));
 const logStateValues = new Set<unknown>(Object.values(LogStates));
@@ -80,6 +81,9 @@ export class SecretRedactor {
     for (const [key, detail] of Object.entries(value)) {
       if (key === "reason" && typeof detail === "string" && safeDetailReasons.has(detail)) {
         details.reason = detail;
+      }
+      if (key === "timeoutKind" && typeof detail === "string" && safeTimeoutKinds.has(detail)) {
+        details.timeoutKind = detail;
       }
       if (key === "digest" && typeof detail === "string" && sha256Pattern.test(detail)) {
         details.digest = detail;

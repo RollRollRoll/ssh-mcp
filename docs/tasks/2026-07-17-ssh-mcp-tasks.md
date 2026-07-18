@@ -110,7 +110,7 @@
   - 活动操作最多 32 个，过期 ID 与未知 ID 返回不同稳定错误。
 - 验证方式：`npm test -- tests/unit/operation-manager.test.ts tests/contract/operation-control.test.ts && npm run typecheck`。
 - 覆盖：设计 5.1 `OperationManager`、7.11–7.12、8.1、8.3、10、11；规格 Requirement「单次命令执行」的输出边界、「长任务、超时与取消」「结果与错误契约」；MUST NOT 9、10、12。
-- [ ] 完成
+- [x] 完成
 
 ### Task 6：交付单主机原始命令执行闭环
 

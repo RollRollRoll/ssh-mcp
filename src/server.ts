@@ -3,7 +3,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ConfigLoader } from "./config/loader.js";
 import { HostRegistry } from "./hosts/host-registry.js";
+import { OperationManager } from "./operations/operation-manager.js";
 import { registerHostsListTool } from "./tools/hosts-list.js";
+import { registerOperationControlTools } from "./tools/operation-control.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -24,13 +26,13 @@ export function resolveConfigPath(
   return args[1];
 }
 
-export function createServer(registry?: HostRegistry): McpServer {
+export function createServer(registry?: HostRegistry, operationManager?: OperationManager): McpServer {
   const server = new McpServer({
     name: "ssh-mcp",
     version: "0.1.0"
   });
 
-  registerTools(server, registry);
+  registerTools(server, registry, operationManager);
   return server;
 }
 
@@ -39,12 +41,15 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
     throw new Error("启动服务需要 --config <absolute-path> 或 SSH_MCP_CONFIG");
   }
   const config = new ConfigLoader(configPath).load();
-  const server = createServer(new HostRegistry(config.hosts));
+  const server = createServer(new HostRegistry(config.hosts), new OperationManager({
+    limits: config.limits,
+    outputBufferBytes: config.limits.outputBufferBytes
+  }));
 
   await server.connect(new StdioServerTransport());
 }
 
-export function registerTools(server: McpServer, registry?: HostRegistry): void {
+export function registerTools(server: McpServer, registry?: HostRegistry, operationManager?: OperationManager): void {
   // 使用高层 API 初始化工具 handler；移除后仍保留 T1 所需的空工具列表。
   const bootstrapRegistration = server.registerTool(
     "bootstrap-tool-registry",
@@ -56,5 +61,8 @@ export function registerTools(server: McpServer, registry?: HostRegistry): void 
 
   if (registry !== undefined) {
     registerHostsListTool(server, registry);
+  }
+  if (operationManager !== undefined) {
+    registerOperationControlTools(server, operationManager);
   }
 }

@@ -46,7 +46,7 @@ describe("MCP stdio 启动入口", () => {
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
   });
 
-  it("成功加载配置后完成初始化并仅注册登记主机工具，stdout 仅输出 MCP 帧", async () => {
+  it("成功加载配置后完成初始化并注册基础工具，stdout 仅输出 MCP 帧", async () => {
     const child = spawn(process.execPath, ["dist/index.js"], {
       cwd: projectRoot,
       env: {
@@ -89,7 +89,13 @@ describe("MCP stdio 启动入口", () => {
     expect(toolsList).toMatchObject({
       jsonrpc: "2.0",
       id: 2,
-      result: { tools: [expect.objectContaining({ name: "hosts_list" })] }
+      result: {
+        tools: expect.arrayContaining([
+          expect.objectContaining({ name: "hosts_list" }),
+          expect.objectContaining({ name: "operation_get" }),
+          expect.objectContaining({ name: "operation_cancel" })
+        ])
+      }
     });
   });
 
