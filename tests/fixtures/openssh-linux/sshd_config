@@ -9,7 +9,7 @@ ChallengeResponseAuthentication no
 PermitEmptyPasswords no
 UsePAM no
 PermitRootLogin no
-AllowUsers sshmcp
+AllowUsers sshmcp sshmcpignore
 StrictModes yes
 PrintMotd no
 Subsystem sftp internal-sftp

@@ -127,7 +127,7 @@
   - 中文、CRLF、无效 UTF-8 和超过缓冲范围的输出均按 Task 5 契约读取。
 - 验证方式：`npm test -- tests/contract/command-run.test.ts && npm run test:integration:linux -- command`；Windows 环境执行 `npm run test:integration:windows -- command`。
 - 覆盖：设计 7.2、9.3；规格 Requirement「操作授权」「单次命令执行」「跨平台行为」「结果与错误契约」；MUST NOT 10、13。
-- [ ] 完成
+- [x] 完成
 
 ### Task 7：交付结构化低风险 Profile 自动执行
 

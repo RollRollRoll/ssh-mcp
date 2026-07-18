@@ -93,10 +93,14 @@ describe("MCP stdio 启动入口", () => {
         tools: expect.arrayContaining([
           expect.objectContaining({ name: "hosts_list" }),
           expect.objectContaining({ name: "operation_get" }),
-          expect.objectContaining({ name: "operation_cancel" })
+          expect.objectContaining({ name: "operation_cancel" }),
+          expect.objectContaining({ name: "command_run" })
         ])
       }
     });
+    const commandRunTools = (toolsList as { result: { tools: Array<{ name: string }> } }).result.tools
+      .filter((tool) => tool.name === "command_run");
+    expect(commandRunTools).toHaveLength(1);
   });
 
   it("注册工具后可列出并调用", async () => {

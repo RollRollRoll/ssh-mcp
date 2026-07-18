@@ -34,6 +34,7 @@ const OperationGetOutputSchema = z.object({
   minCursor: z.number().optional(),
   truncated: z.boolean().optional(),
   droppedBytes: z.number().optional(),
+  result: z.record(z.unknown()).optional(),
   error: ErrorSchema.shape.error.optional()
 });
 const OperationCancelOutputSchema = z.object({

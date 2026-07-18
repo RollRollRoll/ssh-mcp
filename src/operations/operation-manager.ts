@@ -27,6 +27,11 @@ export interface MonotonicClock {
 
 export interface OperationRunner {
   cancel(reason: "cancel" | "timeout"): void | Promise<void>;
+  /**
+   * 强制断开前同步冻结运行器已知结果；管理器在同一终态提交中持久化该快照。
+   * 不支持异步返回，避免强制关闭后的迟到事件在结果写入前抢占终态。
+   */
+  forceStop?(): Readonly<Record<string, unknown>> | undefined;
 }
 
 export type OperationTimeoutKind = "connect" | "command" | "session" | "transfer" | "approval";
@@ -72,6 +77,7 @@ export interface OperationManagerOptions {
 export interface OperationSnapshot {
   readonly operationId: string;
   readonly state: OperationState;
+  readonly result?: Readonly<Record<string, unknown>>;
   readonly error?: McpOperationError;
 }
 
@@ -96,6 +102,7 @@ interface OperationRecord {
   cancelReason: "cancel" | "timeout" | undefined;
   timeoutKind: OperationTimeoutKind | undefined;
   error: McpOperationError | undefined;
+  result: Readonly<Record<string, unknown>> | undefined;
   timeoutTimer: unknown;
   cancellationTimer: unknown;
   retentionTimer: unknown;
@@ -144,6 +151,7 @@ export class OperationManager {
       cancelReason: undefined,
       timeoutKind,
       error: undefined,
+      result: undefined,
       timeoutTimer: undefined,
       cancellationTimer: undefined,
       retentionTimer: undefined
@@ -172,9 +180,10 @@ export class OperationManager {
     return this.snapshot(record);
   }
 
-  public complete(id: string): OperationSnapshot { return this.finish(id, "completed"); }
-  public fail(id: string): OperationSnapshot { return this.finish(id, "failed"); }
-  public partialFailure(id: string): OperationSnapshot { return this.finish(id, "partial_failure"); }
+  public complete(id: string, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "completed", undefined, result); }
+  public fail(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "failed", error, result); }
+  public partialFailure(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "partial_failure", error, result); }
+  public unknown(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "unknown", error, result); }
 
   public appendOutput(id: string, stream: OutputStream, data: Buffer): void {
     const record = this.record(id);
@@ -211,7 +220,11 @@ export class OperationManager {
   }
 
   /** 仅由运行器在远端 Channel/流真正停止后调用。 */
-  public confirmStopped(id: string): OperationSnapshot {
+  public confirmStopped(
+    id: string,
+    result?: Readonly<Record<string, unknown>>,
+    error?: McpOperationError
+  ): OperationSnapshot {
     const record = this.record(id);
     if (isTerminalOperationState(record.machine.state)) {
       return this.snapshot(record);
@@ -219,14 +232,19 @@ export class OperationManager {
     if (record.cancelReason === undefined) {
       throw new Error("操作未处于等待停止确认状态");
     }
-    return this.finishRecord(record, record.cancelReason === "timeout" ? "timed_out" : "cancelled");
+    return this.finishRecord(
+      record,
+      record.cancelReason === "timeout" ? "timed_out" : "cancelled",
+      error,
+      result
+    );
   }
 
-  private finish(id: string, state: "completed" | "failed" | "partial_failure"): OperationSnapshot {
-    return this.finishRecord(this.record(id), state);
+  private finish(id: string, state: "completed" | "failed" | "partial_failure" | "unknown", error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot {
+    return this.finishRecord(this.record(id), state, error, result);
   }
 
-  private finishRecord(record: OperationRecord, state: OperationState, error?: McpOperationError): OperationSnapshot {
+  private finishRecord(record: OperationRecord, state: OperationState, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot {
     if (isTerminalOperationState(record.machine.state)) {
       return this.snapshot(record);
     }
@@ -238,6 +256,9 @@ export class OperationManager {
     record.cancellationTimer = undefined;
     record.runner = undefined;
     record.cancelReason = undefined;
+    if (result !== undefined) {
+      record.result = Object.freeze({ ...result });
+    }
     if (error !== undefined) {
       record.error = error;
     } else if (state === "unknown") {
@@ -274,7 +295,13 @@ export class OperationManager {
     }
     record.cancellationTimer = this.clock.setTimeout(() => {
       if (!isTerminalOperationState(record.machine.state) && record.cancelReason !== undefined) {
-        this.finishRecord(record, "unknown");
+        let result: Readonly<Record<string, unknown>> | undefined;
+        try {
+          result = record.runner?.forceStop?.();
+        } catch {
+          // 强制关闭是尽力而为；无法证明远端停止，仍须收敛为 unknown。
+        }
+        this.finishRecord(record, "unknown", undefined, result);
       }
     }, this.limits.cancelConfirmationTimeoutMs);
   }
@@ -364,7 +391,7 @@ export class OperationManager {
   }
 
   private snapshot(record: OperationRecord): OperationSnapshot {
-    return Object.freeze({ operationId: record.id, state: record.machine.state, ...(record.error === undefined ? {} : { error: record.error }) });
+    return Object.freeze({ operationId: record.id, state: record.machine.state, ...(record.result === undefined ? {} : { result: record.result }), ...(record.error === undefined ? {} : { error: record.error }) });
   }
 
   private error(
