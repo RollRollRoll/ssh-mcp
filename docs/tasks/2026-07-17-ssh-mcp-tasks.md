@@ -92,7 +92,7 @@
   - Linux OpenSSH 容器验证首次信任、一致信任、密钥变化、认证成功/失败和连接超时。
 - 验证方式：`npm test -- tests/unit/trust-store.test.ts && npm run test:integration:linux -- connection && npm run typecheck`。
 - 覆盖：设计 3.3、3.4、5.1 `TrustStore/SshAdapter`、6.2、9.2；规格 Requirement「主机身份信任」「认证与敏感信息隔离」「跨平台行为」；MUST NOT 1、4、8、11、13。
-- [ ] 完成
+- [x] 完成
 
 ### Task 5：实现操作状态机、有界输出与通用查询取消
 

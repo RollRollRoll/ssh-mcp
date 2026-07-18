@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "pretest": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration:linux": "vitest run --config vitest.integration.config.ts tests/integration/linux/connection.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

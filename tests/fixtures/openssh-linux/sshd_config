@@ -1,0 +1,15 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/fixture_host_key
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+UsePAM no
+PermitRootLogin no
+AllowUsers sshmcp
+StrictModes yes
+PrintMotd no
+Subsystem sftp internal-sftp
