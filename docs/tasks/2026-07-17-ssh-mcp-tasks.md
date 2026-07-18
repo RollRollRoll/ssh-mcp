@@ -74,7 +74,7 @@
   - 测试以假审批客户端证明批准前 SSH 和文件系统执行调用数为 0。
 - 验证方式：`npm test -- tests/unit/approval.test.ts tests/unit/redaction.test.ts && npm run typecheck`。
 - 覆盖：设计 3.2、5.1 `ApprovalService/SecretRedactor/ErrorMapper/Logger`、9.1、11、12、13；规格 Requirement「MCP 行为与输入校验」「操作授权」「结果与错误契约」；MUST NOT 1、2、4、5、10。
-- [ ] 完成
+- [x] 完成
 
 ### Task 4：实现严格主机信任、SSH 认证与平台探针
 
