@@ -162,7 +162,7 @@
   - Linux 与 Windows 真实测试覆盖持久上下文、中文、控制字符、尺寸变化、并发会话和断连。
 - 验证方式：`npm test -- tests/unit/session-manager.test.ts tests/contract/session-tools.test.ts && npm run test:integration:linux -- session`；Windows 环境执行 `npm run test:integration:windows -- session`。
 - 覆盖：设计 5.1 `SessionManager`、7.4–7.8、8.2、9.4；规格 Requirement「交互会话」「长任务、超时与取消」「跨平台行为」；MUST NOT 10、12、13。
-- [ ] 完成
+- [x] 完成
 
 ### Task 9：实现本地、Linux 与 Windows 路径安全守卫
 

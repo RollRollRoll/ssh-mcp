@@ -95,7 +95,12 @@ describe("MCP stdio 启动入口", () => {
           expect.objectContaining({ name: "operation_get" }),
           expect.objectContaining({ name: "operation_cancel" }),
           expect.objectContaining({ name: "command_run" }),
-          expect.objectContaining({ name: "profile_run" })
+          expect.objectContaining({ name: "profile_run" }),
+          expect.objectContaining({ name: "session_open" }),
+          expect.objectContaining({ name: "session_write" }),
+          expect.objectContaining({ name: "session_read" }),
+          expect.objectContaining({ name: "session_resize" }),
+          expect.objectContaining({ name: "session_close" })
         ])
       }
     });

@@ -4,6 +4,7 @@ export type Platform = "linux" | "windows";
 export type OperationIntentKind =
   | "raw_command"
   | "profile"
+  | "session_open"
   | "session_input"
   | "session_resize"
   | "upload"
@@ -37,6 +38,7 @@ interface FactoryIntentState {
 const operationIntentKinds = new Set<OperationIntentKind>([
   "raw_command",
   "profile",
+  "session_open",
   "session_input",
   "session_resize",
   "upload",

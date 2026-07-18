@@ -21,6 +21,11 @@ export interface SshAdapterClock {
 export interface SshClientLike extends ProbeClient {
   connect(config: ConnectConfig): this;
   exec(command: string, callback: (error: Error | undefined, channel: ProbeChannel) => void): this;
+  exec(command: string, options: { pty: { term: string; cols: number; rows: number; width: number; height: number } }, callback: (error: Error | undefined, channel: ProbeChannel) => void): this;
+  shell(
+    window: { term: string; cols: number; rows: number; width: number; height: number },
+    callback: (error: Error | undefined, channel: ProbeChannel) => void
+  ): this;
   once(event: "ready", listener: () => void): this;
   on(event: "error", listener: (error: Error & { level?: string; code?: string }) => void): this;
   once(event: "close", listener: () => void): this;
@@ -39,7 +44,14 @@ export interface SshAdapterDependencies {
 
 export interface SshConnection {
   exec(command: string, callback: (error: Error | undefined, channel: ProbeChannel) => void): void;
+  openShell(
+    columns: number,
+    rows: number,
+    shellCommand: string,
+    callback: (error: Error | undefined, channel: ProbeChannel) => void
+  ): void;
   close(): void;
+  onClose?(listener: () => void): void;
 }
 
 export class SshAdapterError extends Error {
@@ -204,7 +216,15 @@ export class SshAdapter {
           clearPhaseTimer();
           resolve({
             exec: (command, callback) => { client.exec(command, callback); },
-            close: () => { client.end(); }
+            // 使用带 PTY 的 exec 显式启动登记 Shell，绝不退回 SSH 服务端默认登录 Shell。
+            openShell: (columns, rows, shellCommand, callback) => {
+              const command = host.platform === "linux"
+                ? `${quotePosix(shellCommand)} -i`
+                : `${quoteWindowsExecutable(shellCommand)} -NoLogo -NoProfile -NonInteractive -NoExit`;
+              client.exec(command, { pty: { term: "xterm-256color", cols: columns, rows, width: 0, height: 0 } }, callback);
+            },
+            close: () => { client.end(); },
+            onClose: (listener) => { client.once("close", listener); }
           });
         }, fail);
       });
@@ -244,6 +264,14 @@ export class SshAdapter {
       throw new SshAdapterError(ErrorCodes.AUTH_UNAVAILABLE, undefined, { cause: error });
     }
   }
+}
+
+function quotePosix(value: string): string {
+  return `'${value.replace(/'/g, `"'"'`)}'`;
+}
+
+function quoteWindowsExecutable(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function mapConnectionError(error: unknown, hostKeyFailure: unknown, interactiveOnly: boolean): SshAdapterError | Error {

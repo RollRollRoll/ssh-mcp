@@ -15,6 +15,7 @@ class FakeChannel extends EventEmitter {
 class FakeClient extends EventEmitter implements SshClientLike {
   public config: ConnectConfig | undefined;
   public readonly commands: string[] = [];
+  public readonly ptyOptions: unknown[] = [];
   public ended = false;
 
   public connect(config: ConnectConfig): this {
@@ -22,8 +23,14 @@ class FakeClient extends EventEmitter implements SshClientLike {
     return this;
   }
 
-  public exec(command: string, callback: (error: Error | undefined, channel: FakeChannel) => void): this {
+  public exec(
+    command: string,
+    optionsOrCallback: { pty: unknown } | ((error: Error | undefined, channel: FakeChannel) => void),
+    possibleCallback?: (error: Error | undefined, channel: FakeChannel) => void
+  ): this {
     this.commands.push(command);
+    if (typeof optionsOrCallback !== "function") this.ptyOptions.push(optionsOrCallback);
+    const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : possibleCallback!;
     const channel = new FakeChannel();
     callback(undefined, channel);
     setImmediate(() => {
@@ -135,6 +142,24 @@ describe("SshAdapter", () => {
     accept();
 
     await expect(pending).resolves.toBeDefined();
+  });
+
+  it("PTY 使用带终端选项的 exec 显式启动登记 Shell，绝不调用默认 shell", async () => {
+    const client = new FakeClient();
+    const adapter = new SshAdapter({ verify: async () => undefined }, {
+      createClient: () => client,
+      readFile: async () => Buffer.from("private-key"), stat: async () => ({ isSocket: () => true }), platform: "linux"
+    });
+    const pending = adapter.connect(host());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    client.emit("ready");
+    const connection = await pending;
+    const shell = await new Promise<unknown>((resolve, reject) => {
+      connection.openShell(120, 50, "/opt/custom shell", (error, channel) => error === undefined ? resolve(channel) : reject(error));
+    });
+    expect(shell).toBeDefined();
+    expect(client.commands.at(-1)).toBe("'/opt/custom shell' -i");
+    expect(client.ptyOptions.at(-1)).toEqual({ pty: { term: "xterm-256color", cols: 120, rows: 50, width: 0, height: 0 } });
   });
 
   it("底层在 verifier 永不结束时立即取消、销毁并拒绝", async () => {

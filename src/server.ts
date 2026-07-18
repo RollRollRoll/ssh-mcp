@@ -14,6 +14,8 @@ import { registerHostsListTool } from "./tools/hosts-list.js";
 import { registerOperationControlTools } from "./tools/operation-control.js";
 import { registerProfileRunTool, type ProfileRunDependencies } from "./tools/profile-run.js";
 import { PolicyEngine } from "./policy/policy-engine.js";
+import { SessionManager } from "./sessions/session-manager.js";
+import { registerSessionTools, type SessionToolDependencies } from "./tools/session-tools.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -38,14 +40,15 @@ export function createServer(
   registry?: HostRegistry,
   operationManager?: OperationManager,
   commandRun?: CommandRunDependencies,
-  profileRun?: ProfileRunDependencies
+  profileRun?: ProfileRunDependencies,
+  sessionTools?: SessionToolDependencies
 ): McpServer {
   const server = new McpServer({
     name: "ssh-mcp",
     version: "0.1.0"
   });
 
-  registerTools(server, registry, operationManager, commandRun, profileRun);
+  registerTools(server, registry, operationManager, commandRun, profileRun, sessionTools);
   return server;
 }
 
@@ -59,6 +62,12 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
     outputBufferBytes: config.limits.outputBufferBytes
   });
   const registry = new HostRegistry(config.hosts);
+  const sessions = new SessionManager({
+    outputBufferBytes: config.limits.outputBufferBytes,
+    idleTimeoutMs: config.limits.sessionIdleTimeoutMs,
+    closeConfirmationTimeoutMs: config.limits.cancelConfirmationTimeoutMs,
+    retentionMs: config.limits.resultRetentionMs
+  });
   const server = createServer(registry, manager);
   const approvalClient = new McpApprovalClient(server.server);
   const confirmation: TrustConfirmation = {
@@ -70,13 +79,17 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
       timeoutMs: 120_000
     }, signal)).action
   };
-  const runner = new CommandRunner(new SshAdapter(new StrictHostKeyVerifier(new TrustStore(config.trustStore), confirmation)), manager);
+  // 命令和终端共享同一严格信任/认证适配器，但每次操作仍由适配器新建独立连接。
+  const adapter = new SshAdapter(new StrictHostKeyVerifier(new TrustStore(config.trustStore), confirmation));
+  const approval = new ApprovalService(approvalClient);
+  const runner = new CommandRunner(adapter, manager);
   registerCommandRunTool(server, {
     registry,
-    approval: new ApprovalService(approvalClient),
+    approval,
     runner
   });
   registerProfileRunTool(server, { registry, runner, policy: new PolicyEngine(config.lowRiskProfiles) });
+  registerSessionTools(server, { registry, approval, sessions, adapter });
 
   await server.connect(new StdioServerTransport());
 }
@@ -86,7 +99,8 @@ export function registerTools(
   registry?: HostRegistry,
   operationManager?: OperationManager,
   commandRun?: CommandRunDependencies,
-  profileRun?: ProfileRunDependencies
+  profileRun?: ProfileRunDependencies,
+  sessionTools?: SessionToolDependencies
 ): void {
   // 使用高层 API 初始化工具 handler；移除后仍保留 T1 所需的空工具列表。
   const bootstrapRegistration = server.registerTool(
@@ -108,5 +122,8 @@ export function registerTools(
   }
   if (profileRun !== undefined) {
     registerProfileRunTool(server, profileRun);
+  }
+  if (sessionTools !== undefined) {
+    registerSessionTools(server, sessionTools);
   }
 }

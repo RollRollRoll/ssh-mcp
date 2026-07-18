@@ -11,8 +11,8 @@
     "pretest": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:integration:linux": "vitest run --config vitest.integration.config.ts tests/integration/linux",
-    "test:integration:windows": "vitest run --config vitest.integration.config.ts tests/integration/windows"
+    "test:integration:linux": "node scripts/run-integration.mjs linux",
+    "test:integration:windows": "node scripts/run-integration.mjs windows"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
