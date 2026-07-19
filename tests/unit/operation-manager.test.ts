@@ -61,6 +61,21 @@ describe("OutputBuffer", () => {
     expectError(() => output.read(6, 1), "INVALID_CURSOR");
     expectError(() => output.read(Number.MAX_SAFE_INTEGER + 1, 1), "INVALID_CURSOR");
   });
+
+  it("大量小 frame 的连续增量读取不反复从历史首帧扫描", () => {
+    const output = new OutputBuffer(20_000);
+    for (let index = 0; index < 2_000; index += 1) output.append("stdout", Buffer.from("x"));
+
+    let cursor = 0;
+    for (let index = 0; index < 2_000; index += 1) {
+      const read = output.readEntries(cursor, 1);
+      cursor = read.nextCursor;
+    }
+
+    expect(cursor).toBe(2_000);
+    // 二分定位加实际读取约为 n·log₂n，远小于旧实现的 1+…+n 历史帧扫描。
+    expect(output.entryFrameInspectionCount()).toBeLessThan(30_000);
+  });
 });
 
 describe("OperationManager", () => {
@@ -225,6 +240,18 @@ describe("OperationManager", () => {
 
     expect(() => manager.create({ initialState: "running", timeoutMs: 0 })).toThrow(RangeError);
     expectError(() => manager.get("invalid-create"), "OPERATION_NOT_FOUND");
+  });
+
+  it("父协调器专用无业务超时 API 不影响显式取消协议", () => {
+    const clock = new FakeClock();
+    const runner = new FakeRunner();
+    const manager = new OperationManager({ clock, idFactory: () => "parent" });
+    manager.createWithoutBusinessTimeout({ initialState: "running", runner });
+
+    clock.advance(10_000_000);
+    expect(runner.cancelCalls).toBe(0);
+    manager.cancel("parent");
+    expect(runner.cancelCalls).toBe(1);
   });
 
   it("审批项启动的非法有效预算保持审批状态并继续审批计时", () => {

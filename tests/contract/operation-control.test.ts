@@ -15,13 +15,13 @@ describe("operation_get / operation_cancel", () => {
   it("operation_get 使用字节预算、报告截断，并将非法参数映射为稳定错误", async () => {
     const manager = new OperationManager({ idFactory: () => "operation-1", outputBufferBytes: 4 });
     manager.create({ initialState: "running" });
-    manager.appendOutput("operation-1", "stdout", Buffer.from("hello"));
+    manager.appendOutput("operation-1", "stdout", Buffer.from("hello"), { host: "host-1" });
     const client = await connect(manager);
 
     await expect(client.callTool({ name: "operation_get", arguments: { operationId: "operation-1" } }))
       .resolves.toMatchObject({ structuredContent: {
         state: "running", minCursor: 1, droppedBytes: 1, truncated: true,
-        frames: [{ stream: "stdout", cursor: 1, encoding: "utf8", data: "ello" }]
+        frames: [{ stream: "stdout", cursor: 1, encoding: "utf8", data: "ello", host: "host-1" }]
       } });
     await expect(client.callTool({ name: "operation_get", arguments: { operationId: "operation-1", cursor: 6 } }))
       .resolves.toMatchObject({ isError: true, structuredContent: { error: { code: "INVALID_CURSOR" } } });

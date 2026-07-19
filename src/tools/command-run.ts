@@ -5,10 +5,11 @@ import { createOperationIntent, type OperationIntent } from "../approval/operati
 import { CommandRunner } from "../commands/command-runner.js";
 import { ErrorCodes, createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
 import { HostRegistry } from "../hosts/host-registry.js";
+import { MultiHostCoordinator } from "../multihost/multi-host-coordinator.js";
 import { OperationManagerError } from "../operations/operation-manager.js";
 
 const CommandRunInputSchema = z.object({
-  hosts: z.array(z.string().min(1)).length(1).refine((hosts) => new Set(hosts).size === hosts.length, "主机别名不可重复"),
+  hosts: z.array(z.string().min(1)).min(1).max(10).refine((hosts) => new Set(hosts).size === hosts.length, "主机别名不可重复"),
   command: z.string().refine((command) => command.trim().length > 0, "命令不可为空白"),
   executionMode: z.enum(["parallel", "sequential"]).optional()
 }).strict();
@@ -37,39 +38,54 @@ export interface CommandRunDependencies {
   readonly registry: HostRegistry;
   readonly approval: CommandApprovalPort | ApprovalService;
   readonly runner: CommandRunner;
+  readonly coordinator?: MultiHostCoordinator;
 }
 
-/** 单主机 raw command 的 MCP 外壳：解析主机在审批和操作创建之前完成。 */
+/** 原始命令的 MCP 外壳：完整主机集合在审批和任何操作创建之前解析。 */
 export function registerCommandRunTool(server: McpServer, dependencies: CommandRunDependencies): void {
   server.registerTool("command_run", {
-    description: "经一次性审批后在一个登记主机执行原始命令",
+    description: "经一次性审批后在 1–10 个登记主机执行原始命令",
     inputSchema: CommandRunInputSchema,
     outputSchema: CommandRunOutputSchema
   }, async ({ hosts, command, executionMode }) => {
-    const host = dependencies.registry.get(hosts[0]!);
-    if (host === undefined) {
+    const resolvedHosts = hosts.map((alias) => dependencies.registry.get(alias));
+    if (resolvedHosts.some((host) => host === undefined)) {
       return errorResult(commandError(ErrorCodes.HOST_NOT_REGISTERED));
     }
+    const registeredHosts = resolvedHosts as NonNullable<(typeof resolvedHosts)[number]>[];
     const intent = createOperationIntent({
       kind: "raw_command",
-      hosts,
-      platformByHost: { [host.alias]: host.platform },
+      hosts, platformByHost: Object.fromEntries(registeredHosts.map((host) => [host.alias, host.platform])),
       payload: { command },
       executionMode: executionMode ?? "parallel"
     });
     try {
       const approval = await dependencies.approval.execute(intent, (approvedIntent) => {
+        if (!sameIntent(intent, approvedIntent)) throw new IntentMismatchError();
         const approvedCommand = approvedIntent.payload.command;
         if (typeof approvedCommand !== "string") throw new Error("审批命令载荷无效");
-        return dependencies.runner.start(host, approvedCommand);
+        if (registeredHosts.length === 1) return dependencies.runner.start(registeredHosts[0]!, approvedCommand);
+        if (dependencies.coordinator === undefined) throw new Error("多主机协调器不可用");
+        return dependencies.coordinator.start({
+          hosts: registeredHosts, executionMode: approvedIntent.executionMode ?? "parallel", timeoutKind: "command",
+          failureCode: ErrorCodes.COMMAND_FAILED, timeoutCode: ErrorCodes.COMMAND_TIMEOUT,
+          start: (host) => dependencies.runner.start(host, approvedCommand)
+        });
       });
       if (!approval.approved) return errorResult(approval.error);
       return successResult(approval.value);
     } catch (error: unknown) {
+      if (error instanceof IntentMismatchError) return errorResult(commandError(ErrorCodes.APPROVAL_INTENT_MISMATCH));
       if (error instanceof OperationManagerError) return errorResult(error.error);
       throw error;
     }
   });
+}
+
+class IntentMismatchError extends Error {}
+
+function sameIntent(expected: OperationIntent, approved: OperationIntent): boolean {
+  return expected.kind === approved.kind && expected.digest === approved.digest && expected.canonicalJson === approved.canonicalJson;
 }
 
 function commandError(code: McpOperationError["code"]): McpOperationError {

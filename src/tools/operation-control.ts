@@ -28,7 +28,7 @@ const StateSchema = z.enum(["awaiting_approval", "running", "completed", "failed
 const OperationGetOutputSchema = z.object({
   operationId: z.string().optional(),
   state: StateSchema.optional(),
-  frames: z.array(z.object({ stream: z.enum(["stdout", "stderr"]), cursor: z.number(), encoding: z.enum(["utf8", "base64"]), data: z.string() })).optional(),
+  frames: z.array(z.object({ stream: z.enum(["stdout", "stderr"]), cursor: z.number(), encoding: z.enum(["utf8", "base64"]), data: z.string(), host: z.string().optional() })).optional(),
   nextCursor: z.number().optional(),
   minCursor: z.number().optional(),
   truncated: z.boolean().optional(),

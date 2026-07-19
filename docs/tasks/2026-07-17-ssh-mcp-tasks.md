@@ -233,7 +233,7 @@
   - 验收覆盖 2 台成功、10 台边界、11 台拒绝和至少 1 台失败的部分结果。
 - 验证方式：`npm test -- tests/unit/multi-host.test.ts tests/acceptance/multi-host.test.ts && npm run typecheck`。
 - 覆盖：设计 5.1 `MultiHostCoordinator`、9.7、14；规格 Requirement「多主机协作」及关联命令/传输场景；MUST NOT 6、10。
-- [ ] 完成
+- [x] 完成
 
 ### Task 13：建立 Linux/Windows CI、MCP 合同验收与使用文档
 

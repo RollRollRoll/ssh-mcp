@@ -106,6 +106,7 @@ interface OperationRecord {
   timeoutTimer: unknown;
   cancellationTimer: unknown;
   retentionTimer: unknown;
+  readonly changeListeners: Set<() => void>;
 }
 
 /** 生命周期存储只负责协调运行器，不会自行启动、重试或重放任何远程操作。 */
@@ -130,6 +131,18 @@ export class OperationManager {
   }
 
   public create(options: CreateOperationOptions = {}): OperationSnapshot {
+    return this.createRecord(options, false);
+  }
+
+  /**
+   * 仅供父级协调器使用：父项没有独立业务截止时间，必须由已启动子项的终态或显式取消收敛。
+   * 普通 create/start 的超时契约不受影响。
+   */
+  public createWithoutBusinessTimeout(options: Omit<CreateOperationOptions, "timeoutMs"> = {}): OperationSnapshot {
+    return this.createRecord(options, true);
+  }
+
+  private createRecord(options: CreateOperationOptions, withoutBusinessTimeout: boolean): OperationSnapshot {
     if (this.activeCount() >= 32) {
       throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", false, "none");
     }
@@ -140,7 +153,7 @@ export class OperationManager {
     const initialState = options.initialState ?? "awaiting_approval";
     const timeoutKind = options.timeoutKind ?? "command";
     this.assertTimeoutKind(timeoutKind);
-    const timeoutMs = initialState === "running"
+    const timeoutMs = initialState === "running" && !withoutBusinessTimeout
       ? this.resolveOperationTimeout(options.timeoutMs, timeoutKind)
       : undefined;
     const record: OperationRecord = {
@@ -154,15 +167,26 @@ export class OperationManager {
       result: undefined,
       timeoutTimer: undefined,
       cancellationTimer: undefined,
-      retentionTimer: undefined
+      retentionTimer: undefined,
+      changeListeners: new Set()
     };
     this.records.set(id, record);
     if (initialState === "running") {
-      this.scheduleOperationTimeout(record, timeoutMs!, timeoutKind);
+      if (timeoutMs !== undefined) this.scheduleOperationTimeout(record, timeoutMs, timeoutKind);
     } else {
       this.scheduleApprovalTimeout(record);
     }
     return this.snapshot(record);
+  }
+
+  /** 供父操作按已登记子操作数量计算总预算；不暴露或修改具体限制值。 */
+  public timeoutForKind(kind: OperationTimeoutKind): number {
+    return this.timeoutFor(kind);
+  }
+
+  /** 父协调器必须把子操作的停止确认窗口纳入自身生命周期预算。 */
+  public cancelConfirmationTimeout(): number {
+    return this.limits.cancelConfirmationTimeoutMs;
   }
 
   public start(
@@ -182,13 +206,15 @@ export class OperationManager {
 
   public complete(id: string, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "completed", undefined, result); }
   public fail(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "failed", error, result); }
+  public timedOut(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finishRecord(this.record(id), "timed_out", error, result); }
   public partialFailure(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "partial_failure", error, result); }
   public unknown(id: string, error?: McpOperationError, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "unknown", error, result); }
 
-  public appendOutput(id: string, stream: OutputStream, data: Buffer): void {
+  public appendOutput(id: string, stream: OutputStream, data: Buffer, metadata?: Readonly<{ host?: string }>): void {
     const record = this.record(id);
     if (record.machine.state === "running") {
-      record.output.append(stream, data);
+      record.output.append(stream, data, metadata);
+      this.notifyChanged(record);
     }
   }
 
@@ -197,6 +223,7 @@ export class OperationManager {
     const record = this.record(id);
     if (record.machine.state === "running") {
       record.result = Object.freeze({ ...result });
+      this.notifyChanged(record);
     }
     return this.snapshot(record);
   }
@@ -214,6 +241,19 @@ export class OperationManager {
       }
       throw error;
     }
+  }
+
+  /** 等待运行中操作产生输出、进度或生命周期变化；终态立即返回。 */
+  public waitForChange(id: string): Promise<void> {
+    const record = this.record(id);
+    if (isTerminalOperationState(record.machine.state)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const listener = (): void => {
+        record.changeListeners.delete(listener);
+        resolve();
+      };
+      record.changeListeners.add(listener);
+    });
   }
 
   public cancel(id: string): OperationSnapshot {
@@ -279,6 +319,7 @@ export class OperationManager {
         : this.operationError(ErrorCodes.CANCEL_UNCONFIRMED, "unknown", false, "possible", record.id, { reason: "cancel" });
     }
     record.retentionTimer = this.clock.setTimeout(() => this.expire(record.id), this.limits.resultRetentionMs);
+    this.notifyChanged(record);
     return this.snapshot(record);
   }
 
@@ -393,6 +434,10 @@ export class OperationManager {
     }
     this.records.delete(id);
     this.expiredIds.add(id);
+  }
+
+  private notifyChanged(record: OperationRecord): void {
+    for (const listener of record.changeListeners) listener();
   }
 
   private clearTimer(timer: unknown): void {

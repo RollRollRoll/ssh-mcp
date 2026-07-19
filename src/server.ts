@@ -21,6 +21,7 @@ import { TransferService } from "./transfers/file-transfer.js";
 import { SftpTransferBackend } from "./transfers/sftp-transfer-backend.js";
 import { DirectoryTransferService } from "./transfers/directory-transfer.js";
 import { SftpDirectoryTransferBackend } from "./transfers/directory-transfer-backend.js";
+import { MultiHostCoordinator } from "./multihost/multi-host-coordinator.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -89,12 +90,14 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
   const adapter = new SshAdapter(new StrictHostKeyVerifier(new TrustStore(config.trustStore), confirmation));
   const approval = new ApprovalService(approvalClient);
   const runner = new CommandRunner(adapter, manager);
+  const coordinator = new MultiHostCoordinator(manager);
   registerCommandRunTool(server, {
     registry,
     approval,
-    runner
+    runner,
+    coordinator
   });
-  registerProfileRunTool(server, { registry, runner, policy: new PolicyEngine(config.lowRiskProfiles) });
+  registerProfileRunTool(server, { registry, runner, coordinator, policy: new PolicyEngine(config.lowRiskProfiles) });
   registerSessionTools(server, { registry, approval, sessions, adapter });
   const singleFileTransfer = new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots));
   const directoryTransfer = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend(adapter, config.localRoots));
@@ -103,7 +106,8 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
     approval,
     transfer: { start: (request) => request.recursive ? directoryTransfer.start(request) : singleFileTransfer.start(request) },
     localRoots: config.localRoots,
-    localPlatform: process.platform === "win32" ? "win32" : "posix"
+    localPlatform: process.platform === "win32" ? "win32" : "posix",
+    coordinator
   });
 
   await server.connect(new StdioServerTransport());
@@ -134,15 +138,24 @@ export function registerTools(
     registerOperationControlTools(server, operationManager);
   }
   if (commandRun !== undefined) {
-    registerCommandRunTool(server, commandRun);
+    registerCommandRunTool(server, {
+      ...commandRun,
+      ...(operationManager === undefined || commandRun.coordinator !== undefined ? {} : { coordinator: new MultiHostCoordinator(operationManager) })
+    });
   }
   if (profileRun !== undefined) {
-    registerProfileRunTool(server, profileRun);
+    registerProfileRunTool(server, {
+      ...profileRun,
+      ...(operationManager === undefined || profileRun.coordinator !== undefined ? {} : { coordinator: new MultiHostCoordinator(operationManager) })
+    });
   }
   if (sessionTools !== undefined) {
     registerSessionTools(server, sessionTools);
   }
   if (fileTransferTools !== undefined) {
-    registerFileTransferTools(server, fileTransferTools);
+    registerFileTransferTools(server, {
+      ...fileTransferTools,
+      ...(operationManager === undefined || fileTransferTools.coordinator !== undefined ? {} : { coordinator: new MultiHostCoordinator(operationManager) })
+    });
   }
 }
