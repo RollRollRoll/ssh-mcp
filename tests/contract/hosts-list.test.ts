@@ -5,6 +5,7 @@ import { testWithIds } from "../test-with-ids.js";
 import { loadConfigFromYaml } from "../../src/config/loader.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { createServer } from "../../src/server.js";
+import { ConnectionTrackingSshAdapter } from "../../src/ssh/connection-tracking-adapter.js";
 
 const config = loadConfigFromYaml(`
 version: 1
@@ -70,6 +71,42 @@ describe("hosts_list", () => {
     ]);
 
     expect(registry.list().map((host) => host.alias)).toEqual(["Z", "a", "z", "ä"]);
+  });
+
+  it("hosts_list 反映并发连接引用、最后关闭与失败连接的当前状态", async () => {
+    const registry = new HostRegistry(config.hosts);
+    let attempt = 0;
+    const adapter = new ConnectionTrackingSshAdapter({
+      connect: async (_host, timeoutMs) => {
+        expect(timeoutMs).toBe(3210);
+        attempt += 1;
+        if (attempt === 3) throw new Error("连接失败");
+        let closeListener: (() => void) | undefined;
+        return {
+          exec: () => undefined,
+          openShell: () => undefined,
+          close: () => closeListener?.(),
+          onClose: (listener) => { closeListener = listener; }
+        };
+      }
+    }, registry, 3210);
+    const { client } = await connect(registry);
+    const host = registry.get("alpha")!;
+    const first = await adapter.connect(host);
+    const second = await adapter.connect(host);
+    await expect(client.callTool({ name: "hosts_list", arguments: {} })).resolves.toMatchObject({
+      structuredContent: { hosts: [expect.objectContaining({ alias: "alpha", connectionState: "connected" }), expect.anything()] }
+    });
+    first.close();
+    await expect(client.callTool({ name: "hosts_list", arguments: {} })).resolves.toMatchObject({
+      structuredContent: { hosts: [expect.objectContaining({ alias: "alpha", connectionState: "connected" }), expect.anything()] }
+    });
+    second.close();
+    await expect(client.callTool({ name: "hosts_list", arguments: {} })).resolves.toMatchObject({
+      structuredContent: { hosts: [expect.objectContaining({ alias: "alpha", connectionState: "disconnected" }), expect.anything()] }
+    });
+    await expect(adapter.connect(host)).rejects.toThrow("连接失败");
+    expect(registry.list().find((entry) => entry.alias === "alpha")?.connectionState).toBe("disconnected");
   });
 
   async function connect(registry: HostRegistry): Promise<{ client: Client }> {

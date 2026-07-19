@@ -68,6 +68,22 @@ describe("OperationIntent", () => {
 });
 
 describe("ApprovalService", () => {
+  it("shutdown 会中止挂起审批并保证副作用为零，之后的新审批关闭失败", async () => {
+    const client = new FakeApprovalClient(true);
+    const service = new ApprovalService(client, new FakeClock());
+    const sideEffects = new SideEffectProbe();
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run());
+    await Promise.resolve();
+    service.shutdown();
+    await expect(pending).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_DECLINED", details: { reason: "disconnected" }, sideEffects: "none" }
+    });
+    await expect(service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run()))
+      .resolves.toMatchObject({ approved: false, error: { code: "APPROVAL_DECLINED", sideEffects: "none" } });
+    expect(sideEffects.calls).toBe(0);
+  });
+
   testWithIds(["SAFE-APPROVAL-001"], "展示同一 Intent 的完整信息，批准前不执行副作用，且批准只消费一次", async () => {
     const client = new FakeApprovalClient(true);
     const clock = new FakeClock();

@@ -39,6 +39,9 @@ export type OperationTimeoutKind = "connect" | "command" | "session" | "transfer
 const operationTimeoutKinds = new Set<OperationTimeoutKind>([
   "connect", "command", "session", "transfer", "approval"
 ]);
+const MAX_ACTIVE_OPERATIONS = 32;
+const MAX_OPERATION_RECORDS = 64;
+const MAX_EXPIRED_OPERATION_IDS = 64;
 
 export interface OperationLimits {
   readonly connectTimeoutMs: number;
@@ -72,6 +75,7 @@ export interface OperationManagerOptions {
   readonly idFactory?: () => string;
   readonly limits?: Partial<OperationLimits>;
   readonly outputBufferBytes?: number;
+  readonly onStateChange?: (snapshot: OperationSnapshot) => void;
 }
 
 export interface OperationSnapshot {
@@ -117,12 +121,16 @@ export class OperationManager {
   private readonly clock: MonotonicClock;
   private readonly idFactory: () => string;
   private readonly outputBufferBytes: number;
+  private readonly onStateChange: ((snapshot: OperationSnapshot) => void) | undefined;
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
 
   public constructor(options: OperationManagerOptions = {}) {
     this.clock = options.clock ?? systemClock;
     this.idFactory = options.idFactory ?? randomUUID;
     this.limits = { ...DEFAULT_OPERATION_LIMITS, ...options.limits };
     this.outputBufferBytes = options.outputBufferBytes ?? DEFAULT_OUTPUT_BUFFER_BYTES;
+    this.onStateChange = options.onStateChange;
     for (const value of Object.values(this.limits)) {
       if (!Number.isSafeInteger(value) || value <= 0) {
         throw new RangeError("操作时间预算必须是正安全整数");
@@ -143,7 +151,7 @@ export class OperationManager {
   }
 
   private createRecord(options: CreateOperationOptions, withoutBusinessTimeout: boolean): OperationSnapshot {
-    if (this.activeCount() >= 32) {
+    if (this.shuttingDown || this.activeCount() >= MAX_ACTIVE_OPERATIONS || this.records.size >= MAX_OPERATION_RECORDS) {
       throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", false, "none");
     }
     const id = this.idFactory();
@@ -176,7 +184,9 @@ export class OperationManager {
     } else {
       this.scheduleApprovalTimeout(record);
     }
-    return this.snapshot(record);
+    const snapshot = this.snapshot(record);
+    this.onStateChange?.(snapshot);
+    return snapshot;
   }
 
   /** 供父操作按已登记子操作数量计算总预算；不暴露或修改具体限制值。 */
@@ -195,13 +205,78 @@ export class OperationManager {
     timeoutMs?: number,
     timeoutKind?: OperationTimeoutKind
   ): OperationSnapshot {
+    if (this.shuttingDown) throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", false, "none", id);
     const record = this.record(id);
     const effectiveTimeoutKind = timeoutKind ?? record.timeoutKind ?? "command";
     const effectiveTimeoutMs = this.resolveOperationTimeout(timeoutMs, effectiveTimeoutKind);
     record.machine.transition("running");
     record.runner = runner;
     this.scheduleOperationTimeout(record, effectiveTimeoutMs, effectiveTimeoutKind);
-    return this.snapshot(record);
+    const snapshot = this.snapshot(record);
+    this.onStateChange?.(snapshot);
+    return snapshot;
+  }
+
+  /** 审批通过后，后台运行器接管同一条已经进入 running 的 Operation。 */
+  public attachRunner(
+    id: string,
+    runner: OperationRunner,
+    timeoutKind: OperationTimeoutKind,
+    withoutBusinessTimeout = false
+  ): OperationSnapshot {
+    if (this.shuttingDown) throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", false, "none", id);
+    const record = this.record(id);
+    if (record.machine.state !== "running" || record.runner !== undefined) {
+      throw new Error("只有未被接管的 running 操作可以绑定运行器");
+    }
+    this.clearTimer(record.timeoutTimer);
+    record.timeoutTimer = undefined;
+    record.runner = runner;
+    record.timeoutKind = timeoutKind;
+    if (!withoutBusinessTimeout) {
+      this.scheduleOperationTimeout(record, this.timeoutFor(timeoutKind), timeoutKind);
+    }
+    const snapshot = this.snapshot(record);
+    this.onStateChange?.(snapshot);
+    return snapshot;
+  }
+
+  /** 幂等停止：先请求正常停止，固定截止时间后把无法确认的运行项保守收敛为 unknown。 */
+  public shutdown(timeoutMs = this.limits.cancelConfirmationTimeoutMs): Promise<void> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
+    this.shuttingDown = true;
+    this.shutdownPromise = new Promise((resolve) => {
+      let deadlineTimer: unknown;
+      const finishIfDone = (): void => {
+        if (this.activeCount() !== 0) return;
+        this.clearTimer(deadlineTimer);
+        resolve();
+      };
+      for (const record of this.records.values()) {
+        if (record.machine.state === "awaiting_approval") {
+          this.finishRecord(record, "failed", this.operationError(
+            ErrorCodes.APPROVAL_DECLINED, "failed", false, "none", record.id, { reason: "disconnected" }
+          ));
+        } else if (!isTerminalOperationState(record.machine.state)) {
+          record.changeListeners.add(finishIfDone);
+          this.requestStop(record, "cancel");
+        }
+      }
+      finishIfDone();
+      if (this.activeCount() === 0) return;
+      deadlineTimer = this.clock.setTimeout(() => {
+        for (const record of this.records.values()) {
+          if (isTerminalOperationState(record.machine.state)) continue;
+          let result: Readonly<Record<string, unknown>> | undefined;
+          try { result = record.runner?.forceStop?.(); } catch { /* 截止时间后的强制关闭只做尽力清理。 */ }
+          this.finishRecord(record, "unknown", this.operationError(
+            ErrorCodes.CANCEL_UNCONFIRMED, "unknown", false, "possible", record.id, { reason: "cancel" }
+          ), result);
+        }
+        resolve();
+      }, timeoutMs);
+    });
+    return this.shutdownPromise;
   }
 
   public complete(id: string, result?: Readonly<Record<string, unknown>>): OperationSnapshot { return this.finish(id, "completed", undefined, result); }
@@ -320,6 +395,7 @@ export class OperationManager {
     }
     record.retentionTimer = this.clock.setTimeout(() => this.expire(record.id), this.limits.resultRetentionMs);
     this.notifyChanged(record);
+    this.onStateChange?.(this.snapshot(record));
     return this.snapshot(record);
   }
 
@@ -434,6 +510,10 @@ export class OperationManager {
     }
     this.records.delete(id);
     this.expiredIds.add(id);
+    if (this.expiredIds.size > MAX_EXPIRED_OPERATION_IDS) {
+      const oldest = this.expiredIds.values().next().value;
+      if (oldest !== undefined) this.expiredIds.delete(oldest);
+    }
   }
 
   private notifyChanged(record: OperationRecord): void {

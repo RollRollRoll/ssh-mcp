@@ -8,6 +8,8 @@ import { OperationManager } from "../../src/operations/operation-manager.js";
 import { OperationManagerError } from "../../src/operations/operation-manager.js";
 import { createMcpOperationError } from "../../src/errors/error-contract.js";
 import { createServer } from "../../src/server.js";
+import { ApprovalService } from "../../src/approval/approval-service.js";
+import { TransferService } from "../../src/transfers/file-transfer.js";
 
 const host: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22,
@@ -83,6 +85,29 @@ describe("file_upload/file_download MCP 契约", () => {
       kind: "download", hosts: ["linux"], platformByHost: { linux: "linux" }, executionMode: "sequential",
       payload: { remoteSource: "/remote/source.bin", localTarget: "/local/target.bin", recursive: false, overwrite: true }
     });
+  });
+
+  it("真实审批服务把传输工具的同一 Operation 从等待审批交给后台传输运行器", async () => {
+    const registry = new HostRegistry([host]);
+    const manager = new OperationManager({ idFactory: () => "transfer-approved" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => ({ action: "accept" })
+    }, undefined, 5_000, manager);
+    const transfer = new TransferService(manager, { prepare: async () => await new Promise<never>(() => undefined) });
+    const server = createServer(registry, manager, undefined, undefined, undefined, {
+      registry, approval, transfer, localRoots: ["/local"], localPlatform: "posix"
+    });
+    const client = new Client({ name: "contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    await expect(client.callTool({ name: "file_upload", arguments: {
+      hosts: ["linux"], localSource: "/local/source", remoteTarget: "/remote/target",
+      recursive: false, overwrite: false, executionMode: "parallel"
+    } })).resolves.toMatchObject({ structuredContent: { operationId: "transfer-approved", state: "running" } });
+    expect(manager.get("transfer-approved").state).toBe("running");
   });
 
   it("副作用请求完整地从 fresh approved Intent 重建并按获批 alias 重新解析登记主机", async () => {

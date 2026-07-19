@@ -136,8 +136,8 @@ export class TransferPreparationError extends Error {
 export class TransferService {
   public constructor(private readonly manager: OperationManager, private readonly backend: TransferBackend) {}
 
-  public start(request: TransferRequest): OperationSnapshot {
-    const execution = new TransferExecution(this.manager, this.backend, request);
+  public start(request: TransferRequest, operationId?: string): OperationSnapshot {
+    const execution = new TransferExecution(this.manager, this.backend, request, operationId);
     return execution.start();
   }
 }
@@ -158,11 +158,14 @@ class TransferExecution implements OperationRunner {
   public constructor(
     private readonly manager: OperationManager,
     private readonly backend: TransferBackend,
-    private readonly request: TransferRequest
+    private readonly request: TransferRequest,
+    private readonly existingOperationId?: string
   ) {}
 
   public start(): OperationSnapshot {
-    const snapshot = this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" });
+    const snapshot = this.existingOperationId === undefined
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" })
+      : this.manager.attachRunner(this.existingOperationId, this, "transfer");
     this.operationId = snapshot.operationId;
     this.publishProgress();
     queueMicrotask(() => {

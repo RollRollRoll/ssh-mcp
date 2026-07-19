@@ -63,6 +63,23 @@ describe("OutputBuffer", () => {
     expectError(() => output.read(Number.MAX_SAFE_INTEGER + 1, 1), "INVALID_CURSOR");
   });
 
+  it("旧游标只报告本次请求实际缺失的字节数，包括 frame 部分淘汰", () => {
+    const output = new OutputBuffer(4);
+    output.append("stdout", Buffer.from("abc"));
+    output.append("stderr", Buffer.from("def"));
+
+    expect(output.read(1, 4)).toMatchObject({
+      minCursor: 2,
+      truncated: true,
+      droppedBytes: 1,
+      frames: [
+        { stream: "stdout", cursor: 2, data: "c" },
+        { stream: "stderr", cursor: 3, data: "def" }
+      ]
+    });
+    expect(output.read(2, 4)).toMatchObject({ truncated: false, droppedBytes: 0 });
+  });
+
   it("大量小 frame 的连续增量读取不反复从历史首帧扫描", () => {
     const output = new OutputBuffer(20_000);
     for (let index = 0; index < 2_000; index += 1) output.append("stdout", Buffer.from("x"));
@@ -80,6 +97,24 @@ describe("OutputBuffer", () => {
 });
 
 describe("OperationManager", () => {
+  it("shutdown 幂等且有界，挂起运行器截止后只能收敛为 unknown 并拒绝新操作", async () => {
+    const clock = new FakeClock();
+    const runner = new FakeRunner();
+    const manager = new OperationManager({ clock, idFactory: () => "shutdown-operation" });
+    manager.create({ initialState: "running", runner });
+    const first = manager.shutdown(5);
+    const second = manager.shutdown(5);
+    expect(first).toBe(second);
+    expect(runner.cancelCalls).toBe(1);
+    expect(manager.get("shutdown-operation").state).toBe("running");
+    clock.advance(5);
+    await expect(first).resolves.toBeUndefined();
+    expect(manager.get("shutdown-operation")).toMatchObject({
+      state: "unknown", error: { code: "CANCEL_UNCONFIRMED", sideEffects: "possible" }
+    });
+    expectError(() => manager.create({ initialState: "running" }), "RESOURCE_LIMIT");
+  });
+
   it("只允许状态机主路径，操作终态提交幂等", () => {
     const manager = new OperationManager({ idFactory: () => "state" });
     manager.create({ initialState: "awaiting_approval" });
@@ -341,6 +376,31 @@ describe("OperationManager", () => {
     clock.advance(900_000);
     expectError(() => manager.get("op-1"), "OPERATION_EXPIRED");
     expectError(() => manager.get("missing"), "OPERATION_NOT_FOUND");
+  });
+
+  it("终态记录和过期墓碑均固定有界，预算内不提前破坏 15 分钟保留", () => {
+    const clock = new FakeClock();
+    let sequence = 0;
+    const manager = new OperationManager({ clock, idFactory: () => `bounded-${++sequence}` });
+
+    for (let index = 0; index < 64; index += 1) {
+      const operation = manager.create({ initialState: "running" });
+      manager.complete(operation.operationId);
+    }
+    expect(manager.get("bounded-1").state).toBe("completed");
+    expectError(() => manager.create({ initialState: "running" }), "RESOURCE_LIMIT");
+
+    clock.advance(900_000);
+    expectError(() => manager.get("bounded-1"), "OPERATION_EXPIRED");
+
+    for (let index = 0; index < 64; index += 1) {
+      const operation = manager.create({ initialState: "running" });
+      manager.complete(operation.operationId);
+    }
+    clock.advance(900_000);
+
+    expectError(() => manager.get("bounded-1"), "OPERATION_NOT_FOUND");
+    expectError(() => manager.get("bounded-65"), "OPERATION_EXPIRED");
   });
 });
 

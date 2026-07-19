@@ -9,6 +9,7 @@ import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager } from "../../src/operations/operation-manager.js";
 import { SessionManager } from "../../src/sessions/session-manager.js";
 import { createServer } from "../../src/server.js";
+import { ApprovalService } from "../../src/approval/approval-service.js";
 
 const host: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22, username: "tester",
@@ -79,6 +80,67 @@ describe("session MCP 工具契约", () => {
     await expect(client.callTool({ name: "session_read", arguments: { sessionId: "session-1", cursor: 0, maxBytes: 32 } })).resolves.toMatchObject({
       structuredContent: { frames: [{ stream: "pty", seq: 0, cursor: 0, byteLength: 6, encoding: "utf8", data: "中文" }], nextCursor: 6 }
     });
+  });
+
+  it("真实审批服务让 session_open 在等待期登记 Operation，批准后完成同一记录且批准前零连接", async () => {
+    let release!: () => void;
+    let connections = 0;
+    const registry = new HostRegistry([host]);
+    const operations = new OperationManager({ idFactory: () => "session-approval" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => await new Promise((resolve) => {
+        release = () => resolve({ action: "accept" });
+      })
+    }, undefined, 5_000, operations);
+    const sessions = new SessionManager({ idFactory: () => "approved-session" });
+    const channel = new Channel();
+    const server = createServer(registry, operations, undefined, undefined, {
+      registry, approval, sessions,
+      adapter: { connect: async () => {
+        connections += 1;
+        return { exec: () => undefined, close: () => undefined, openShell: (_c, _r, _s, callback) => callback(undefined, channel as never) };
+      } }
+    });
+    const client = new Client({ name: "contract-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    const pending = client.callTool({ name: "session_open", arguments: { host: "linux", columns: 80, rows: 24 } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(operations.get("session-approval").state).toBe("awaiting_approval");
+    expect(connections).toBe(0);
+    release();
+    await expect(pending).resolves.toMatchObject({ structuredContent: { session: { sessionId: "approved-session", state: "active" } } });
+    expect(operations.get("session-approval").state).toBe("completed");
+    expect(connections).toBe(1);
+  });
+
+  it("等待审批也受 32 个 Operation 上限约束，session 工具稳定返回 RESOURCE_LIMIT 且零连接", async () => {
+    let sequence = 0;
+    let connections = 0;
+    const registry = new HostRegistry([host]);
+    const operations = new OperationManager({ idFactory: () => `occupied-${sequence++}` });
+    for (let index = 0; index < 32; index += 1) operations.create({ initialState: "running" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => ({ action: "accept" })
+    }, undefined, 5_000, operations);
+    const server = createServer(registry, operations, undefined, undefined, {
+      registry,
+      approval,
+      sessions: new SessionManager(),
+      adapter: { connect: async () => { connections += 1; return await new Promise<never>(() => undefined); } }
+    });
+    const client = new Client({ name: "contract-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    await expect(client.callTool({ name: "session_open", arguments: { host: "linux", columns: 80, rows: 24 } }))
+      .resolves.toMatchObject({ isError: true, structuredContent: { error: { code: "RESOURCE_LIMIT", sideEffects: "none" } } });
+    expect(connections).toBe(0);
   });
 
   it("审批拒绝不写入；close 无审批且已 closing 会话拒绝后续写入", async () => {

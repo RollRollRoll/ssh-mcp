@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { type ApprovalExecution, type ApprovalService } from "../approval/approval-service.js";
+import { type ApprovalExecution, type ApprovalExecutionContext, type ApprovalExecutionOptions, type ApprovalService } from "../approval/approval-service.js";
 import { createOperationIntent, type OperationIntent } from "../approval/operation-intent.js";
 import { CommandRunner } from "../commands/command-runner.js";
 import { ErrorCodes, createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
@@ -31,7 +31,7 @@ const CommandRunOutputSchema = z.object({
 }).strict();
 
 interface CommandApprovalPort {
-  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent) => T | Promise<T>): Promise<ApprovalExecution<T>>;
+  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>, options?: ApprovalExecutionOptions): Promise<ApprovalExecution<T>>;
 }
 
 export interface CommandRunDependencies {
@@ -60,18 +60,24 @@ export function registerCommandRunTool(server: McpServer, dependencies: CommandR
       executionMode: executionMode ?? "parallel"
     });
     try {
-      const approval = await dependencies.approval.execute(intent, (approvedIntent) => {
+      const approval = await dependencies.approval.execute(intent, (approvedIntent, context) => {
         if (!sameIntent(intent, approvedIntent)) throw new IntentMismatchError();
         const approvedCommand = approvedIntent.payload.command;
         if (typeof approvedCommand !== "string") throw new Error("审批命令载荷无效");
-        if (registeredHosts.length === 1) return dependencies.runner.start(registeredHosts[0]!, approvedCommand);
+        if (registeredHosts.length === 1) {
+          const snapshot = dependencies.runner.start(registeredHosts[0]!, approvedCommand, context?.operationId);
+          context?.markBackground();
+          return snapshot;
+        }
         if (dependencies.coordinator === undefined) throw new Error("多主机协调器不可用");
-        return dependencies.coordinator.start({
+        const snapshot = dependencies.coordinator.start({
           hosts: registeredHosts, executionMode: approvedIntent.executionMode ?? "parallel", timeoutKind: "command",
           failureCode: ErrorCodes.COMMAND_FAILED, timeoutCode: ErrorCodes.COMMAND_TIMEOUT,
           start: (host) => dependencies.runner.start(host, approvedCommand)
-        });
-      });
+        }, context?.operationId);
+        context?.markBackground();
+        return snapshot;
+      }, { timeoutKind: "command" });
       if (!approval.approved) return errorResult(approval.error);
       return successResult(approval.value);
     } catch (error: unknown) {

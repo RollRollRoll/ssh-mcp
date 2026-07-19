@@ -7,6 +7,7 @@ import type { HostConfig, LowRiskProfile } from "../../src/config/schema.js";
 import { buildCommand } from "../../src/commands/command-builder.js";
 import { CommandRunner } from "../../src/commands/command-runner.js";
 import type { OperationIntent } from "../../src/approval/operation-intent.js";
+import { ApprovalService } from "../../src/approval/approval-service.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager } from "../../src/operations/operation-manager.js";
@@ -100,6 +101,60 @@ describe("command_run MCP 契约", () => {
     expect(intentCommand).toBe("echo 中文");
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(connections).toBe(1);
+  });
+
+  it("真实审批服务让同一 Operation 从 awaiting_approval 进入 running，且等待期可查询并占用操作配额", async () => {
+    let release!: (action: "accept" | "decline") => void;
+    const manager = new OperationManager({ idFactory: () => "approved-operation" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => await new Promise((resolve) => {
+        release = (action) => resolve({ action });
+      })
+    }, undefined, 5_000, manager);
+    const registry = new HostRegistry([linux]);
+    const runner = new CommandRunner({ connect: async () => await new Promise<never>(() => undefined) }, manager);
+    const server = createServer(registry, manager, { registry, approval, runner });
+    const client = new Client({ name: "contract-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    const pending = client.callTool({ name: "command_run", arguments: { hosts: ["linux"], command: "sleep 1" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.get("approved-operation").state).toBe("awaiting_approval");
+    await expect(client.callTool({ name: "operation_get", arguments: { operationId: "approved-operation" } }))
+      .resolves.toMatchObject({ structuredContent: { operationId: "approved-operation", state: "awaiting_approval" } });
+    release("accept");
+    await expect(pending).resolves.toMatchObject({
+      structuredContent: { operationId: "approved-operation", state: "running" }
+    });
+    expect(manager.get("approved-operation").state).toBe("running");
+  });
+
+  it("真实审批拒绝把可查询 Operation 收敛为 failed，错误携带相同 operationId 且零连接", async () => {
+    let connections = 0;
+    const manager = new OperationManager({ idFactory: () => "declined-operation" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => ({ action: "decline" })
+    }, undefined, 5_000, manager);
+    const registry = new HostRegistry([linux]);
+    const runner = new CommandRunner({ connect: async () => { connections += 1; return await new Promise<never>(() => undefined); } }, manager);
+    const server = createServer(registry, manager, { registry, approval, runner });
+    const client = new Client({ name: "contract-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    await expect(client.callTool({ name: "command_run", arguments: { hosts: ["linux"], command: "echo never" } }))
+      .resolves.toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "APPROVAL_DECLINED", operationId: "declined-operation" } }
+      });
+    expect(manager.get("declined-operation")).toMatchObject({ state: "failed", error: { code: "APPROVAL_DECLINED" } });
+    expect(connections).toBe(0);
   });
 
   it.each([

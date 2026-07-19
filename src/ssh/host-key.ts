@@ -82,10 +82,21 @@ export class StrictHostKeyVerifier {
   public constructor(
     private readonly trustStore: TrustStore,
     private readonly confirmation: TrustConfirmation,
-    private readonly clock: HostKeyClock = systemClock
+    private readonly clock: HostKeyClock = systemClock,
+    private readonly onResult?: (alias: string, errorCode?: ErrorCode) => void
   ) {}
 
   public async verify(target: HostKeyTarget, rawKey: Buffer, signal?: HostKeyVerificationContext): Promise<void> {
+    try {
+      await this.verifyOnce(target, rawKey, signal);
+      this.onResult?.(target.alias);
+    } catch (error: unknown) {
+      this.onResult?.(target.alias, error instanceof HostKeyVerificationError ? error.code : ErrorCodes.TRUST_STORE_ERROR);
+      throw error;
+    }
+  }
+
+  private async verifyOnce(target: HostKeyTarget, rawKey: Buffer, signal?: HostKeyVerificationContext): Promise<void> {
     rejectIfAborted(signal);
     let candidate: PublicHostKey;
     try {

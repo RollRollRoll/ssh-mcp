@@ -69,6 +69,7 @@ export interface SessionManagerOptions {
   readonly idleTimeoutMs?: number;
   readonly closeConfirmationTimeoutMs?: number;
   readonly retentionMs?: number;
+  readonly onStateChange?: (snapshot: SessionSnapshot) => void;
 }
 
 interface SessionRecord {
@@ -99,6 +100,8 @@ const systemClock: SessionClock = {
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimeout: (timer) => clearTimeout(timer as NodeJS.Timeout)
 };
+const MAX_SESSION_RECORDS = 40;
+const MAX_EXPIRED_SESSION_IDS = 40;
 
 /** 进程内 PTY 会话生命周期；不做重连、恢复、重放或共享连接。 */
 export class SessionManager {
@@ -111,6 +114,10 @@ export class SessionManager {
   private readonly idleTimeoutMs: number;
   private readonly closeConfirmationTimeoutMs: number;
   private readonly retentionMs: number;
+  private readonly onStateChange: ((snapshot: SessionSnapshot) => void) | undefined;
+  private readonly shutdownWaiters = new Set<() => void>();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
 
   public constructor(options: SessionManagerOptions = {}) {
     this.clock = options.clock ?? systemClock;
@@ -120,13 +127,16 @@ export class SessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 1_800_000;
     this.closeConfirmationTimeoutMs = options.closeConfirmationTimeoutMs ?? 10_000;
     this.retentionMs = options.retentionMs ?? 900_000;
+    this.onStateChange = options.onStateChange;
     for (const value of [this.outputBufferBytes, this.maxSessions, this.idleTimeoutMs, this.closeConfirmationTimeoutMs, this.retentionMs]) {
       if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError("会话限制必须为正安全整数");
     }
   }
 
   public reserve(input: { host: string; platform: "linux" | "windows"; shell: "posix" | "powershell"; columns: number; rows: number }): SessionSnapshot {
-    if (this.activeCount() >= this.maxSessions) throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", "none");
+    if (this.shuttingDown || this.activeCount() >= this.maxSessions || this.records.size >= MAX_SESSION_RECORDS) {
+      throw this.error(ErrorCodes.RESOURCE_LIMIT, "failed", "none");
+    }
     const id = this.idFactory();
     if (id.length === 0 || this.records.has(id) || this.expired.has(id)) throw new Error("会话 ID 必须唯一且非空");
     const record: SessionRecord = {
@@ -137,7 +147,9 @@ export class SessionManager {
       nextFrameSeq: 0, resourcesClosed: false, pendingWriteTerminations: new Set()
     };
     this.records.set(id, record);
-    return this.snapshot(record);
+    const snapshot = this.snapshot(record);
+    this.onStateChange?.(snapshot);
+    return snapshot;
   }
 
   public activate(id: string, connection: SessionConnection, channel: SessionChannel): SessionSnapshot {
@@ -148,7 +160,9 @@ export class SessionManager {
     record.state = "active";
     this.observe(record);
     this.touch(record);
-    return this.snapshot(record);
+    const snapshot = this.snapshot(record);
+    this.onStateChange?.(snapshot);
+    return snapshot;
   }
 
   /** 打开失败不会留下可查询句柄。 */
@@ -220,6 +234,38 @@ export class SessionManager {
     return this.snapshot(record);
   }
 
+  /** 幂等停止全部 PTY；截止时间内未收到关闭证据的会话保守标记为 unknown。 */
+  public shutdown(timeoutMs = this.closeConfirmationTimeoutMs): Promise<void> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
+    this.shuttingDown = true;
+    this.shutdownPromise = new Promise((resolve) => {
+      let deadlineTimer: unknown;
+      const finishIfDone = (): void => {
+        if (this.activeCount() !== 0) return;
+        this.clear(deadlineTimer);
+        this.shutdownWaiters.delete(finishIfDone);
+        resolve();
+      };
+      this.shutdownWaiters.add(finishIfDone);
+      for (const record of this.records.values()) {
+        if (record.state === "opening" || record.state === "active" || record.state === "closing") this.requestClose(record);
+      }
+      finishIfDone();
+      if (this.activeCount() === 0) return;
+      deadlineTimer = this.clock.setTimeout(() => {
+        for (const record of this.records.values()) {
+          if (record.state !== "opening" && record.state !== "active" && record.state !== "closing") continue;
+          record.forced = true;
+          this.releaseResources(record);
+          this.finish(record, "unknown");
+        }
+        this.shutdownWaiters.delete(finishIfDone);
+        resolve();
+      }, timeoutMs);
+    });
+    return this.shutdownPromise;
+  }
+
   private observe(record: SessionRecord): void {
     const onData = (chunk: Buffer | string): void => {
       if (record.state !== "active") return;
@@ -245,6 +291,7 @@ export class SessionManager {
   private requestClose(record: SessionRecord): void {
     if (record.state !== "opening" && record.state !== "active") return;
     record.state = "closing";
+    this.onStateChange?.(this.snapshot(record));
     this.terminatePendingWrites(record);
     this.clear(record.idleTimer);
     record.idleTimer = undefined;
@@ -281,6 +328,8 @@ export class SessionManager {
     record.closeTimer = undefined;
     this.releaseResources(record);
     record.retentionTimer = this.clock.setTimeout(() => this.expire(record.id), this.retentionMs);
+    this.onStateChange?.(this.snapshot(record));
+    for (const waiter of [...this.shutdownWaiters]) waiter();
   }
 
   private requireActive(id: string): SessionRecord {
@@ -306,6 +355,10 @@ export class SessionManager {
     if (record === undefined || record.state === "opening" || record.state === "active" || record.state === "closing") return;
     this.records.delete(id);
     this.expired.add(id);
+    if (this.expired.size > MAX_EXPIRED_SESSION_IDS) {
+      const oldest = this.expired.values().next().value;
+      if (oldest !== undefined) this.expired.delete(oldest);
+    }
   }
 
   private clear(timer: unknown): void { if (timer !== undefined) this.clock.clearTimeout(timer); }

@@ -6,6 +6,7 @@ import {
   isVerifiedOperationIntent,
   type OperationIntent
 } from "./operation-intent.js";
+import { OperationManager, type OperationTimeoutKind } from "../operations/operation-manager.js";
 
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 
@@ -34,6 +35,23 @@ export type ApprovalExecution<T> =
   | { readonly approved: true; readonly intent: OperationIntent; readonly value: T }
   | { readonly approved: false; readonly error: McpOperationError };
 
+export interface ApprovalExecutionContext {
+  readonly operationId?: string;
+  /** 后台运行器已经接管同一 Operation；审批服务不得把它提前结算为 completed。 */
+  markBackground(): void;
+}
+
+export interface ApprovalExecutionOptions {
+  readonly timeoutKind?: OperationTimeoutKind;
+}
+
+export interface ApprovalResultEvent {
+  readonly operationId?: string;
+  readonly digest: string;
+  readonly approved: boolean;
+  readonly errorCode?: McpOperationError["code"];
+}
+
 /** 将 SDK 的已协商能力适配为可注入审批端口。 */
 export class McpApprovalClient implements ApprovalClient {
   public constructor(private readonly server: Server) {}
@@ -60,29 +78,75 @@ export class McpApprovalClient implements ApprovalClient {
  * 所有副作用都经由本服务的回调门控；批准只用于当前调用，并且只会调用一次回调。
  */
 export class ApprovalService {
+  private readonly pendingControllers = new Set<AbortController>();
+  private shuttingDown = false;
+
   public constructor(
     private readonly client: ApprovalClient,
     private readonly clock: Clock = systemClock,
-    private readonly timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS
+    private readonly timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
+    private readonly operations?: OperationManager,
+    private readonly onResult?: (event: ApprovalResultEvent) => void
   ) {}
 
   public async execute<T>(
     intent: OperationIntent,
-    sideEffect: (approvedIntent: OperationIntent) => T | Promise<T>
+    sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>,
+    options: ApprovalExecutionOptions = {}
   ): Promise<ApprovalExecution<T>> {
     if (!isVerifiedOperationIntent(intent)) {
       return intentMismatchError();
     }
+    if (this.shuttingDown) return { approved: false, error: approvalError(ErrorCodes.APPROVAL_DECLINED, "failed", "disconnected") };
+    const awaiting = this.operations?.create({ initialState: "awaiting_approval", timeoutKind: "approval" });
+    const operationId = awaiting?.operationId;
     const approvalFailure = await this.requestApproval(intent);
     if (approvalFailure !== undefined) {
-      return { approved: false, error: approvalFailure };
+      const error = operationId === undefined ? approvalFailure : withOperationId(approvalFailure, operationId);
+      if (operationId !== undefined) this.operations!.fail(operationId, error);
+      this.onResult?.({ operationId, digest: intent.digest, approved: false, errorCode: error.code });
+      return { approved: false, error };
     }
     if (!consumeVerifiedOperationIntent(intent)) {
-      return intentMismatchError();
+      const mismatch = intentMismatchError();
+      if (operationId === undefined) return mismatch;
+      const error = withOperationId(mismatch.error, operationId);
+      this.operations!.fail(operationId, error);
+      this.onResult?.({ operationId, digest: intent.digest, approved: false, errorCode: error.code });
+      return { approved: false, error };
     }
+    if (operationId !== undefined) this.operations!.start(operationId, undefined, undefined, options.timeoutKind ?? "command");
+    let background = false;
+    const context: ApprovalExecutionContext = Object.freeze({
+      ...(operationId === undefined ? {} : { operationId }),
+      markBackground: () => { background = true; }
+    });
+    try {
+      const value = await sideEffect(intent, context);
+      if (operationId !== undefined && !background) this.operations!.complete(operationId);
+      this.onResult?.({ operationId, digest: intent.digest, approved: true });
+      return { approved: true, intent, value };
+    } catch (error: unknown) {
+      if (operationId !== undefined && !background) {
+        // 已进入批准后的执行阶段；任意异常都不能再宣称副作用为零。
+        this.operations!.unknown(operationId, createMcpOperationError({
+          code: ErrorCodes.STATE_UNKNOWN,
+          message: ErrorCodes.STATE_UNKNOWN,
+          finalState: "unknown",
+          retriable: false,
+          sideEffects: "possible",
+          operationId
+        }, undefined, { allowedOperationIds: new Set([operationId]) }));
+      }
+      throw error;
+    }
+  }
 
-    const value = await sideEffect(intent);
-    return { approved: true, intent, value };
+  public shutdown(): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    for (const controller of this.pendingControllers) controller.abort();
+    this.pendingControllers.clear();
   }
 
   private async requestApproval(intent: OperationIntent): Promise<McpOperationError | undefined> {
@@ -91,6 +155,7 @@ export class ApprovalService {
     }
 
     const controller = new AbortController();
+    this.pendingControllers.add(controller);
     let timer: unknown;
     const timeout = new Promise<"timeout">((resolve) => {
       timer = this.clock.setTimeout(() => {
@@ -98,14 +163,21 @@ export class ApprovalService {
         controller.abort();
       }, this.timeoutMs);
     });
+    const interrupted = new Promise<"shutdown">((resolve) => {
+      controller.signal.addEventListener("abort", () => resolve("shutdown"), { once: true });
+    });
 
     try {
-      const response = await Promise.race<ApprovalResponse | "timeout">([
+      const response = await Promise.race<ApprovalResponse | "timeout" | "shutdown">([
         this.client.elicit(createApprovalForm(intent, this.timeoutMs), controller.signal),
-        timeout
+        timeout,
+        interrupted
       ]);
       if (response === "timeout") {
         return approvalError(ErrorCodes.APPROVAL_TIMEOUT, "timed_out");
+      }
+      if (response === "shutdown") {
+        return approvalError(ErrorCodes.APPROVAL_DECLINED, "failed", "disconnected");
       }
       if (response.action === "accept") {
         return undefined;
@@ -118,6 +190,7 @@ export class ApprovalService {
       return approvalError(ErrorCodes.APPROVAL_DECLINED, "failed", "disconnected");
     } finally {
       this.clock.clearTimeout(timer);
+      this.pendingControllers.delete(controller);
     }
   }
 }
@@ -159,7 +232,7 @@ function approvalError(
   });
 }
 
-function intentMismatchError(): ApprovalExecution<never> {
+function intentMismatchError(): { readonly approved: false; readonly error: McpOperationError } {
   return {
     approved: false,
     error: createMcpOperationError({
@@ -170,4 +243,8 @@ function intentMismatchError(): ApprovalExecution<never> {
       sideEffects: "none"
     })
   };
+}
+
+function withOperationId(error: McpOperationError, operationId: string): McpOperationError {
+  return createMcpOperationError({ ...error, operationId }, undefined, { allowedOperationIds: new Set([operationId]) });
 }

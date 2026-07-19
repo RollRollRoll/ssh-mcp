@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ApprovalExecution, ApprovalService } from "../approval/approval-service.js";
+import type { ApprovalExecution, ApprovalExecutionContext, ApprovalExecutionOptions, ApprovalService } from "../approval/approval-service.js";
 import { createOperationIntent, type OperationIntent } from "../approval/operation-intent.js";
 import { ErrorCodes, createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
 import { HostRegistry } from "../hosts/host-registry.js";
@@ -35,7 +35,7 @@ const OutputSchema = z.object({
 }).strict();
 
 interface TransferApprovalPort {
-  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent) => T | Promise<T>): Promise<ApprovalExecution<T>>;
+  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>, options?: ApprovalExecutionOptions): Promise<ApprovalExecution<T>>;
 }
 
 export interface FileTransferToolDependencies {
@@ -91,17 +91,23 @@ async function executeTransfer(
     kind: direction, hosts: input.hosts, platformByHost: Object.fromEntries(hosts.map((host) => [host.alias, host.platform])), payload,
     executionMode: input.executionMode
   });
-  const approval = await dependencies.approval.execute(expected, (approved) => {
+  const approval = await dependencies.approval.execute(expected, (approved, context) => {
     if (!sameIntent(expected, approved)) throw new IntentMismatchError();
     const requests = requestsFromApprovedIntent(dependencies, approved);
-    if (requests.length === 1) return dependencies.transfer.start(requests[0]!);
+    if (requests.length === 1) {
+      const snapshot = dependencies.transfer.start(requests[0]!, context?.operationId);
+      context?.markBackground();
+      return snapshot;
+    }
     if (dependencies.coordinator === undefined) throw new Error("多主机协调器不可用");
-    return dependencies.coordinator.start({
+    const snapshot = dependencies.coordinator.start({
       hosts: requests.map((request) => request.host), executionMode: approved.executionMode!, timeoutKind: "transfer",
       failureCode: ErrorCodes.TRANSFER_FAILED, timeoutCode: ErrorCodes.TRANSFER_TIMEOUT,
       start: (host) => dependencies.transfer.start(requests.find((request) => request.host.alias === host.alias)!)
-    });
-  }).catch((error: unknown) => {
+    }, context?.operationId);
+    context?.markBackground();
+    return snapshot;
+  }, { timeoutKind: "transfer" }).catch((error: unknown) => {
     if (error instanceof IntentMismatchError) return { approved: false as const, error: simpleError(ErrorCodes.APPROVAL_INTENT_MISMATCH) };
     if (error instanceof OperationManagerError) return { approved: false as const, error: error.error };
     if (error instanceof PathGuardError) return { approved: false as const, error: simpleError(error.code) };

@@ -56,7 +56,6 @@ export class OutputBuffer {
   private bytes = 0;
   private endCursor = 0;
   private minimumCursor = 0;
-  private dropped = 0;
   /** 仅用于验证游标定位不会退化为逐次从首帧扫描。 */
   private entryFrameInspections = 0;
 
@@ -135,7 +134,7 @@ export class OutputBuffer {
       nextCursor: position,
       minCursor: this.minimumCursor,
       truncated,
-      droppedBytes: this.dropped
+      droppedBytes: truncated ? this.minimumCursor - cursor : 0
     });
   }
 
@@ -166,7 +165,6 @@ export class OutputBuffer {
       }
       const amount = Math.min(this.bytes - this.capacityBytes, oldest.data.length);
       this.bytes -= amount;
-      this.dropped += amount;
       this.minimumCursor += amount;
       if (amount === oldest.data.length) {
         this.frames.shift();

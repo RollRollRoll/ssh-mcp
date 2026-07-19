@@ -59,9 +59,9 @@ interface ChildRecord {
 export class MultiHostCoordinator {
   public constructor(private readonly manager: OperationManager) {}
 
-  public start(options: MultiHostStartOptions): OperationSnapshot {
+  public start(options: MultiHostStartOptions, operationId?: string): OperationSnapshot {
     assertHosts(options.hosts);
-    return new MultiHostExecution(this.manager, options).start();
+    return new MultiHostExecution(this.manager, options, operationId).start();
   }
 }
 
@@ -71,7 +71,11 @@ class MultiHostExecution implements OperationRunner {
   private stopReason: "cancel" | "timeout" | undefined;
   private readonly children: ChildRecord[];
 
-  public constructor(private readonly manager: OperationManager, private readonly options: MultiHostStartOptions) {
+  public constructor(
+    private readonly manager: OperationManager,
+    private readonly options: MultiHostStartOptions,
+    private readonly existingOperationId?: string
+  ) {
     this.children = options.hosts.map((host) => ({
       host, operationId: undefined, state: "not_started", result: undefined, error: undefined,
       outputCursor: 0, outputTruncated: false, outputDroppedBytes: 0, outputFinished: false
@@ -79,10 +83,12 @@ class MultiHostExecution implements OperationRunner {
   }
 
   public start(): OperationSnapshot {
-    const snapshot = this.manager.createWithoutBusinessTimeout({
-      initialState: "running", runner: this, timeoutKind: this.options.timeoutKind,
-      // 父操作不得以独立业务计时器抢占已启动子项的超时与停止确认窗口。
-    });
+    const snapshot = this.existingOperationId === undefined
+      ? this.manager.createWithoutBusinessTimeout({
+        initialState: "running", runner: this, timeoutKind: this.options.timeoutKind,
+        // 父操作不得以独立业务计时器抢占已启动子项的超时与停止确认窗口。
+      })
+      : this.manager.attachRunner(this.existingOperationId, this, this.options.timeoutKind, true);
     this.operationId = snapshot.operationId;
     this.publish();
     queueMicrotask(() => { void this.run().catch((error: unknown) => this.backgroundFailure(error)); });

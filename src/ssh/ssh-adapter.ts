@@ -121,14 +121,20 @@ const systemClock: SshAdapterClock = {
 };
 
 export class SshAdapter {
+  private readonly activeClients = new Set<SshClientLike>();
+  private shuttingDown = false;
+
   public constructor(
     private readonly hostKeyVerifier: HostKeyVerifierPort,
     private readonly dependencies: SshAdapterDependencies = defaultDependencies
   ) {}
 
   public async connect(host: HostConfig, timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS): Promise<SshConnection> {
+    if (this.shuttingDown) throw new SshAdapterError(ErrorCodes.CONNECTION_REFUSED);
     const authentication = await this.prepareAuthentication(host);
+    if (this.shuttingDown) throw new SshAdapterError(ErrorCodes.CONNECTION_REFUSED);
     const client = this.dependencies.createClient();
+    this.activeClients.add(client);
     const clock = this.dependencies.clock ?? systemClock;
     let hostKeyFailure: unknown;
     let interactiveOnly = false;
@@ -201,6 +207,7 @@ export class SshAdapter {
         if (settled) return;
         settled = true;
         clearPhaseTimer();
+        this.activeClients.delete(client);
         client.destroy();
         reject(mapConnectionError(error, hostKeyFailure, interactiveOnly));
       };
@@ -250,7 +257,10 @@ export class SshAdapter {
         ...authentication.config
       };
       client.on("error", fail);
-      client.once("close", () => fail(new Error("连接已关闭")));
+      client.once("close", () => {
+        this.activeClients.delete(client);
+        fail(new Error("连接已关闭"));
+      });
       client.once("ready", () => {
         void runPlatformProbe(client, host).then(() => {
           if (settled) return;
@@ -287,6 +297,16 @@ export class SshAdapter {
         fail(error);
       }
     });
+  }
+
+  /** 同步销毁所有待连接及已连接客户端；重复调用不产生新副作用。 */
+  public shutdown(): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    for (const client of [...this.activeClients]) {
+      try { client.destroy(); } catch { /* 进程停止只做尽力关闭。 */ }
+    }
+    this.activeClients.clear();
   }
 
   private async prepareAuthentication(host: HostConfig): Promise<{

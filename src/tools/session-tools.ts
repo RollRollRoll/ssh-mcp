@@ -1,10 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { type ApprovalExecution, type ApprovalService } from "../approval/approval-service.js";
+import { type ApprovalExecution, type ApprovalExecutionContext, type ApprovalExecutionOptions, type ApprovalService } from "../approval/approval-service.js";
 import { createOperationIntent, type OperationIntent } from "../approval/operation-intent.js";
 import type { HostConfig } from "../config/schema.js";
 import { createMcpOperationError, ErrorCodes, type McpOperationError } from "../errors/error-contract.js";
 import { HostRegistry } from "../hosts/host-registry.js";
+import { OperationManagerError } from "../operations/operation-manager.js";
 import { SessionManager, SessionManagerError, type SessionClock, type SessionSnapshot } from "../sessions/session-manager.js";
 import { SshAdapterError, type SshAdapter, type SshConnection } from "../ssh/ssh-adapter.js";
 
@@ -52,7 +53,7 @@ const SessionReadOutputSchema = z.object({
 }).strict();
 
 interface SessionApprovalPort {
-  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent) => T | Promise<T>): Promise<ApprovalExecution<T>>;
+  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>, options?: ApprovalExecutionOptions): Promise<ApprovalExecution<T>>;
 }
 
 export interface SessionToolDependencies {
@@ -82,7 +83,7 @@ export function registerSessionTools(server: McpServer, dependencies: SessionToo
       payload: { columns, rows, shell: host.shell.type, shellCommand: host.shell.command }
     });
     try {
-      const approval = await dependencies.approval.execute(intent, async (approved) => await openApprovedSession(dependencies, host, intent, approved));
+      const approval = await dependencies.approval.execute(intent, async (approved) => await openApprovedSession(dependencies, host, intent, approved), { timeoutKind: "session" });
       return approval.approved ? openSnapshotResult(approval.value) : errorResult(approval.error);
     } catch (error: unknown) { return caughtError(error); }
   });
@@ -110,7 +111,7 @@ export function registerSessionTools(server: McpServer, dependencies: SessionToo
           if (!isInputPayload(payload) || !hasExactKeys(payload, ["encoding", "value"])
             || payload.encoding !== data.encoding || payload.value !== data.value) throw intentMismatchForSession(dependencies.sessions, sessionId);
           return dependencies.sessions.write(approved.payload.sessionId, decodeInput(payload));
-        });
+        }, { timeoutKind: "session" });
         if (!approval.approved) throw approvalFailureForSession(dependencies.sessions, sessionId, approval.error);
         return approval.value;
       });
@@ -148,7 +149,7 @@ export function registerSessionTools(server: McpServer, dependencies: SessionToo
             throw intentMismatchForSession(dependencies.sessions, sessionId);
           }
           return dependencies.sessions.resize(payload.sessionId, payload.columns, payload.rows);
-        });
+        }, { timeoutKind: "session" });
         if (!approval.approved) throw approvalFailureForSession(dependencies.sessions, sessionId, approval.error);
         return approval.value;
       });
@@ -279,6 +280,7 @@ function approvalFailureForSession(sessions: SessionManager, sessionId: string, 
 }
 function caughtError(error: unknown) {
   if (error instanceof SessionManagerError) return errorResult(error.error, error.session);
+  if (error instanceof OperationManagerError) return errorResult(error.error);
   if (error instanceof SshAdapterError) return errorResult(simpleError(error.code));
   return errorResult(simpleError(ErrorCodes.INTERNAL_ERROR));
 }

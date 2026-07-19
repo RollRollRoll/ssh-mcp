@@ -39,6 +39,25 @@ function reserve(manager: SessionManager, id = "s-1") {
 }
 
 describe("SessionManager", () => {
+  it("shutdown 幂等关闭所有 PTY，截止后保守 unknown 并拒绝新会话", async () => {
+    const clock = new Clock();
+    const manager = new SessionManager({ clock, idFactory: () => "shutdown-session", closeConfirmationTimeoutMs: 100 });
+    reserve(manager, "shutdown-session");
+    const channel = new Channel();
+    let connectionCloses = 0;
+    manager.activate("shutdown-session", { close: () => { connectionCloses += 1; } }, channel);
+    const first = manager.shutdown(5);
+    const second = manager.shutdown(5);
+    expect(first).toBe(second);
+    expect(manager.get("shutdown-session").state).toBe("closing");
+    expect(channel.closes).toBe(1);
+    clock.advance(5);
+    await expect(first).resolves.toBeUndefined();
+    expect(manager.get("shutdown-session").state).toBe("unknown");
+    expect(connectionCloses).toBe(1);
+    expectError(() => manager.reserve({ host: "late", platform: "linux", shell: "posix", columns: 1, rows: 1 }), ErrorCodes.RESOURCE_LIMIT);
+  });
+
   it("opening 占用资源，激活后独立保存 PTY 原始字节与尺寸", () => {
     const manager = new SessionManager({ idFactory: () => "s-1", maxSessions: 1 });
     reserve(manager);
@@ -224,7 +243,36 @@ describe("SessionManager", () => {
     expect(channel.closes).toBe(1);
     expect(connection.closes).toBe(1);
   });
+
+  it("终态记录和过期墓碑均固定有界，预算内不提前破坏 15 分钟保留", () => {
+    const clock = new Clock();
+    let sequence = 0;
+    const manager = new SessionManager({ clock, idFactory: () => `bounded-${++sequence}` });
+
+    for (let index = 0; index < 40; index += 1) finishSession(manager);
+    expect(manager.get("bounded-1").state).toBe("disconnected");
+    expectError(
+      () => manager.reserve({ host: "linux", platform: "linux", shell: "posix", columns: 80, rows: 24 }),
+      ErrorCodes.RESOURCE_LIMIT
+    );
+
+    clock.advance(900_000);
+    expectError(() => manager.get("bounded-1"), ErrorCodes.SESSION_EXPIRED);
+
+    for (let index = 0; index < 40; index += 1) finishSession(manager);
+    clock.advance(900_000);
+
+    expectError(() => manager.get("bounded-1"), ErrorCodes.SESSION_NOT_FOUND);
+    expectError(() => manager.get("bounded-41"), ErrorCodes.SESSION_EXPIRED);
+  });
 });
+
+function finishSession(manager: SessionManager): void {
+  const session = manager.reserve({ host: "linux", platform: "linux", shell: "posix", columns: 80, rows: 24 });
+  const channel = new Channel();
+  manager.activate(session.sessionId, { close: () => undefined }, channel);
+  channel.emit("close");
+}
 
 function expectError(action: () => unknown, code: string): void {
   try { action(); } catch (error: unknown) {

@@ -28,10 +28,14 @@ export interface CommandResult extends Readonly<Record<string, unknown>> {
 
 /** 一次运行只创建一个连接；运行器从已审批 Intent 的命令启动，不重试或重放。 */
 export class CommandRunner {
-  public constructor(private readonly adapter: Pick<SshAdapter, "connect">, private readonly manager: OperationManager) {}
+  public constructor(
+    private readonly adapter: Pick<SshAdapter, "connect">,
+    private readonly manager: OperationManager,
+    private readonly connectTimeoutMs = 15_000
+  ) {}
 
-  public start(host: HostConfig, command: string): OperationSnapshot {
-    const execution = new CommandExecution(this.adapter, this.manager, host, command);
+  public start(host: HostConfig, command: string, operationId?: string): OperationSnapshot {
+    const execution = new CommandExecution(this.adapter, this.manager, host, command, this.connectTimeoutMs, operationId);
     return execution.start();
   }
 }
@@ -54,11 +58,15 @@ class CommandExecution implements OperationRunner {
     private readonly adapter: Pick<SshAdapter, "connect">,
     private readonly manager: OperationManager,
     private readonly host: HostConfig,
-    private readonly rawCommand: string
+    private readonly rawCommand: string,
+    private readonly connectTimeoutMs: number,
+    private readonly existingOperationId?: string
   ) {}
 
   public start(): OperationSnapshot {
-    const snapshot = this.manager.create({ initialState: "running", runner: this, timeoutKind: "command" });
+    const snapshot = this.existingOperationId === undefined
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "command" })
+      : this.manager.attachRunner(this.existingOperationId, this, "command");
     this.operationId = snapshot.operationId;
     queueMicrotask(() => { void this.run(); });
     return snapshot;
@@ -88,7 +96,7 @@ class CommandExecution implements OperationRunner {
 
   private async run(): Promise<void> {
     try {
-      const connection = await this.adapter.connect(this.host, 15_000);
+      const connection = await this.adapter.connect(this.host, this.connectTimeoutMs);
       this.connection = connection;
       this.phase = "connection_ready";
       if (this.stopping) {

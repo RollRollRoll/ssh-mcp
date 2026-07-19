@@ -1,0 +1,50 @@
+import type { HostConfig } from "../config/schema.js";
+import { HostRegistry } from "../hosts/host-registry.js";
+import type { SshAdapter, SshConnection } from "./ssh-adapter.js";
+
+/** 为所有命令、会话与传输共用的连接入口维护当前连接引用计数。 */
+export class ConnectionTrackingSshAdapter {
+  public constructor(
+    private readonly adapter: Pick<SshAdapter, "connect">,
+    private readonly registry: HostRegistry,
+    private readonly connectTimeoutMs: number,
+    private readonly onStateChange?: (host: string, state: "connected" | "disconnected") => void
+  ) {}
+
+  public async connect(host: HostConfig): Promise<SshConnection> {
+    let connection: SshConnection;
+    try {
+      connection = await this.adapter.connect(host, this.connectTimeoutMs);
+    } catch (error: unknown) {
+      this.registry.connectionFailed(host.alias);
+      this.onStateChange?.(host.alias, "disconnected");
+      throw error;
+    }
+    this.registry.connectionOpened(host.alias);
+    this.onStateChange?.(host.alias, "connected");
+    let closed = false;
+    const markClosed = (): void => {
+      if (closed) return;
+      closed = true;
+      this.registry.connectionClosed(host.alias);
+      this.onStateChange?.(host.alias, "disconnected");
+    };
+    connection.onClose?.(markClosed);
+    return {
+      exec: (command, callback) => connection.exec(command, callback),
+      openShell: (columns, rows, shellCommand, callback) => connection.openShell(columns, rows, shellCommand, callback),
+      close: () => {
+        try { connection.close(); } finally { markClosed(); }
+      },
+      onClose: (listener) => connection.onClose?.(listener),
+      ...(connection.openSftp === undefined
+        ? {}
+        : { openSftp: (callback: Parameters<NonNullable<SshConnection["openSftp"]>>[0]) => connection.openSftp!(callback) })
+    };
+  }
+
+  public shutdown(): void {
+    const stoppable = this.adapter as Pick<SshAdapter, "connect"> & { shutdown?: () => void };
+    stoppable.shutdown?.();
+  }
+}

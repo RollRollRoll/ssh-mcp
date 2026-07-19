@@ -67,9 +67,9 @@ export interface DirectoryTransferResult extends Readonly<Record<string, unknown
 export class DirectoryTransferService {
   public constructor(private readonly manager: OperationManager, private readonly backend: DirectoryTransferBackend) {}
 
-  public start(request: TransferRequest): OperationSnapshot {
+  public start(request: TransferRequest, operationId?: string): OperationSnapshot {
     if (!request.recursive) throw new TypeError("目录服务只接受 recursive=true");
-    return new DirectoryTransferExecution(this.manager, this.backend, request).start();
+    return new DirectoryTransferExecution(this.manager, this.backend, request, operationId).start();
   }
 }
 
@@ -98,11 +98,14 @@ class DirectoryTransferExecution implements OperationRunner {
   public constructor(
     private readonly manager: OperationManager,
     private readonly backend: DirectoryTransferBackend,
-    private readonly request: TransferRequest
+    private readonly request: TransferRequest,
+    private readonly existingOperationId?: string
   ) {}
 
   public start(): OperationSnapshot {
-    const snapshot = this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" });
+    const snapshot = this.existingOperationId === undefined
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" })
+      : this.manager.attachRunner(this.existingOperationId, this, "transfer");
     this.operationId = snapshot.operationId;
     this.publish();
     queueMicrotask(() => void this.run().catch((error: unknown) => this.backgroundFailure(error)));
