@@ -1,14 +1,25 @@
 import { EventEmitter } from "node:events";
+import { PassThrough, Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
+import { ApprovalService } from "../../src/approval/approval-service.js";
+import { createOperationIntent } from "../../src/approval/operation-intent.js";
 import type { HostConfig } from "../../src/config/schema.js";
 import { CommandRunner } from "../../src/commands/command-runner.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
 import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
+import { LinuxPathGuard } from "../../src/paths/linux-path-guard.js";
+import { SessionManager, SessionManagerError } from "../../src/sessions/session-manager.js";
+import { AtomicTarget, type AtomicTargetPort } from "../../src/transfers/atomic-target.js";
+import { DirectoryTransferService, type PreparedDirectoryTransfer } from "../../src/transfers/directory-transfer.js";
+import { TransferService, type PreparedTransfer, type TransferRequest } from "../../src/transfers/file-transfer.js";
 
 class Channel extends EventEmitter {
   public readonly stderr = new EventEmitter();
   public signals: string[] = [];
   public signal(value: string): void { this.signals.push(value); }
+  public write(_data: Buffer, callback?: (error?: Error | null) => void): boolean { callback?.(); return true; }
+  public setWindow(_rows: number, _columns: number, _height: number, _width: number): void {}
   public close(): void { this.emit("close", undefined, undefined); }
 }
 
@@ -60,7 +71,7 @@ describe("CommandRunner", () => {
     });
   });
 
-  it("取消仅发送一次 TERM，并且远端 close 确认后才报告 cancelled", async () => {
+  testWithIds(["SC-035"], "取消仅发送一次 TERM，并且远端 close 确认后才报告 cancelled", async () => {
     const channel = new Channel();
     const manager = new OperationManager({ idFactory: () => "cmd-2" });
     const runner = new CommandRunner({ connect: async () => ({ exec: (_value, callback) => callback(undefined, channel), close: () => undefined }) }, manager);
@@ -73,7 +84,7 @@ describe("CommandRunner", () => {
     expect(manager.get("cmd-2").state).toBe("cancelled");
   });
 
-  it("exec 已提交但 callback 延迟时，取消只能在强制关闭后收敛 unknown，迟到 close 不得误确认", async () => {
+  testWithIds(["SC-036"], "exec 已提交但 callback 延迟时，取消只能在强制关闭后收敛 unknown，迟到 close 不得误确认", async () => {
     const clock = new FakeClock();
     const channel = new Channel();
     let callback: ((error: Error | undefined, channel: Channel) => void) | undefined;
@@ -155,25 +166,47 @@ describe("CommandRunner", () => {
     expect(closeCalls).toBe(1);
   });
 
-  it("连接与 exec callback 失败均保留稳定错误码和最小结果", async () => {
-    const connectManager = new OperationManager({ idFactory: () => "connect-error" });
-    const connectRunner = new CommandRunner({ connect: async () => { throw codedError(ErrorCodes.CONNECTION_TIMEOUT); } }, connectManager);
-    connectRunner.start(host, "echo never");
-    await tick();
-    expect(connectManager.get("connect-error")).toMatchObject({
-      state: "failed", error: { code: "CONNECTION_TIMEOUT", sideEffects: "none" },
-      result: { host: "linux", platform: "linux", stdoutBytes: 0, stderrBytes: 0 }
+  testWithIds(["SC-056"], "七类操作错误均由真实组件路径产生并保留稳定分类与已有安全结果", async () => {
+    const approval = await approvalDeclinedResult();
+    expect(approval).toMatchObject({ approved: false, error: stableError(ErrorCodes.APPROVAL_DECLINED, "failed", "none") });
+
+    const pathDenied = await directorySetupFailure("path");
+    expect(pathDenied).toMatchObject({
+      state: "failed", error: stableError(ErrorCodes.PATH_DENIED, "failed", "none"),
+      result: { aggregateTransferredBytes: 0, completedItems: 0, succeeded: [], failed: [] }
     });
 
-    const execManager = new OperationManager({ idFactory: () => "exec-error" });
-    const execRunner = new CommandRunner({ connect: async () => ({
-      exec: (_value, callback) => callback(codedError(ErrorCodes.CONNECTION_REFUSED), undefined as never), close: () => undefined
-    }) }, execManager);
-    execRunner.start(host, "echo never");
-    await tick();
-    expect(execManager.get("exec-error")).toMatchObject({
-      state: "failed", error: { code: "CONNECTION_REFUSED", sideEffects: "none" },
-      result: { host: "linux", platform: "linux", stdoutBytes: 0, stderrBytes: 0 }
+    const targetExists = await directorySetupFailure("target");
+    expect(targetExists).toMatchObject({
+      state: "failed", error: stableError(ErrorCodes.TARGET_EXISTS, "failed", "none"),
+      result: { aggregateTransferredBytes: 0, completedItems: 0, succeeded: [], failed: [] }
+    });
+
+    const commandTimeout = await commandTimeoutResult();
+    expect(commandTimeout).toMatchObject({
+      state: "timed_out", error: stableError(ErrorCodes.COMMAND_TIMEOUT, "timed_out", "confirmed"),
+      result: { stdoutBytes: 3, stderrBytes: 0 }
+    });
+
+    const sessionExpired = sessionExpiredResult();
+    expect(sessionExpired).toMatchObject({
+      error: stableError(ErrorCodes.SESSION_EXPIRED, "failed", "none"),
+      lastSafeSnapshot: { sessionId: "expired-session", state: "disconnected" }
+    });
+
+    const transferFailed = await transferFailedResult();
+    expect(transferFailed).toMatchObject({
+      state: "failed", error: stableError(ErrorCodes.TRANSFER_FAILED, "failed", "none"),
+      result: { transferredBytes: 0, completedItems: 0, finalTargetCommit: "not_committed" }
+    });
+
+    const partialFailure = await partialFailureResult();
+    expect(partialFailure).toMatchObject({
+      state: "partial_failure", error: stableError(ErrorCodes.PARTIAL_FAILURE, "partial_failure", "partial"),
+      result: {
+        aggregateTransferredBytes: 1, completedItems: 1, succeeded: ["a"],
+        failed: [{ relativePath: "b", code: ErrorCodes.TRANSFER_FAILED, safety: "confirmed" }]
+      }
     });
   });
 
@@ -220,7 +253,7 @@ describe("CommandRunner", () => {
     expect(manager.get("stopping-missing-exit").result).not.toHaveProperty("exitCode");
   });
 
-  it("执行中的 close 未携带退出信息时保留结果并报告状态未知", async () => {
+  testWithIds(["SC-057"], "执行中的 close 未携带退出信息时保留结果并报告状态未知", async () => {
     const channel = new Channel();
     const manager = new OperationManager({ idFactory: () => "missing-exit" });
     const runner = new CommandRunner({ connect: async () => ({
@@ -245,3 +278,147 @@ function codedError(code: string): Error & { code: string } {
 }
 
 async function tick(): Promise<void> { await new Promise<void>((resolve) => setImmediate(resolve)); }
+
+function stableError(code: string, finalState: string, sideEffects: string) {
+  return { code, finalState, retriable: false, sideEffects };
+}
+
+async function approvalDeclinedResult() {
+  const service = new ApprovalService({
+    supportsFormElicitation: () => true,
+    elicit: async () => ({ action: "decline" as const })
+  }, new FakeClock());
+  const intent = createOperationIntent({
+    kind: "raw_command", hosts: ["linux"], platformByHost: { linux: "linux" }, payload: { command: "echo never" }
+  });
+  return await service.execute(intent, () => { throw new Error("审批拒绝后不得执行副作用"); });
+}
+
+async function directorySetupFailure(kind: "path" | "target") {
+  const manager = new OperationManager({ idFactory: () => `directory-${kind}` });
+  const service = new DirectoryTransferService(manager, {
+    prepare: async () => {
+      if (kind === "path") {
+        let ioCalls = 0;
+        const guard = new LinuxPathGuard(["/safe"], {
+          lstat: async () => { ioCalls += 1; return { kind: "directory", id: "safe" }; },
+          realpath: async (path) => path
+        });
+        try { await guard.verify("/outside/denied"); } finally { expect(ioCalls).toBe(0); }
+      } else {
+        await new AtomicTarget("/safe/existing", false, "posix", atomicPort("file"), () => "exists").open();
+      }
+      throw new Error("不可达");
+    }
+  });
+  const started = service.start(transferRequest(true));
+  await waitForTerminal(manager, started.operationId);
+  return manager.get(started.operationId);
+}
+
+async function commandTimeoutResult() {
+  const clock = new FakeClock();
+  const channel = new Channel();
+  const manager = new OperationManager({ clock, idFactory: () => "sc-056-timeout", limits: { commandTimeoutMs: 1 } });
+  const runner = new CommandRunner({ connect: async () => ({
+    exec: (_value, callback) => callback(undefined, channel), close: () => undefined
+  }) }, manager);
+  const started = runner.start(host, "sleep 10");
+  await tick();
+  channel.emit("data", Buffer.from("abc"));
+  clock.advance(1);
+  channel.emit("close", 143, "TERM");
+  return manager.get(started.operationId);
+}
+
+function sessionExpiredResult() {
+  const clock = new FakeClock();
+  const manager = new SessionManager({ clock, idFactory: () => "expired-session", retentionMs: 1 });
+  manager.reserve({ host: "linux", platform: "linux", shell: "posix", columns: 80, rows: 24 });
+  const channel = new Channel();
+  manager.activate("expired-session", { close: () => undefined }, channel);
+  channel.emit("close");
+  const lastSafeSnapshot = manager.describe("expired-session");
+  clock.advance(1);
+  try {
+    manager.get("expired-session");
+    throw new Error("过期会话必须拒绝查询");
+  } catch (error: unknown) {
+    if (!(error instanceof SessionManagerError)) throw error;
+    return { error: error.error, lastSafeSnapshot };
+  }
+}
+
+async function transferFailedResult() {
+  const manager = new OperationManager({ idFactory: () => "transfer-failed" });
+  const service = new TransferService(manager, {
+    prepare: async () => {
+      await new AtomicTarget("/safe/target", false, "posix", atomicPort("absent", true), () => "failed-open").open();
+      throw new Error("不可达");
+    }
+  });
+  const started = service.start(transferRequest(false));
+  await waitForTerminal(manager, started.operationId);
+  return manager.get(started.operationId);
+}
+
+async function partialFailureResult() {
+  const manager = new OperationManager({ idFactory: () => "directory-partial-sc-056" });
+  const transfers = new Map<string, PreparedTransfer>([
+    ["a", preparedTransfer(Buffer.from("a"), 1)],
+    ["b", preparedTransfer(Buffer.from("bad"), 99)]
+  ]);
+  const directory: PreparedDirectoryTransfer = {
+    entries: [
+      { relativePath: "a", kind: "file", size: 1, id: "a" },
+      { relativePath: "b", kind: "file", size: 99, id: "b" }
+    ],
+    createTargetRoot: async () => undefined,
+    createDirectory: async () => undefined,
+    prepareFile: async (entry) => transfers.get(entry.relativePath)!,
+    close: async () => undefined
+  };
+  const service = new DirectoryTransferService(manager, { prepare: async () => directory });
+  const started = service.start(transferRequest(true));
+  await waitForTerminal(manager, started.operationId);
+  return manager.get(started.operationId);
+}
+
+function atomicPort(status: "absent" | "file", failOpen = false): AtomicTargetPort {
+  return {
+    inspect: async () => status,
+    supportsAtomicReplace: () => true,
+    supportsNoReplace: () => true,
+    openExclusive: async () => {
+      if (failOpen) throw new Error("受控写入端打开失败");
+      throw new Error("目标已存在时不得创建临时写入端");
+    },
+    commitNoReplace: async () => true,
+    commitReplace: async () => true,
+    remove: async () => undefined
+  };
+}
+
+function preparedTransfer(source: Buffer, totalBytes: number): PreparedTransfer {
+  return {
+    source: Readable.from([source]), target: new PassThrough(), totalBytes,
+    seal: async () => undefined, commit: async () => undefined,
+    cleanup: async () => true, close: async () => undefined
+  };
+}
+
+function transferRequest(recursive: boolean): TransferRequest {
+  return {
+    direction: "upload", host, source: "/local/source", target: "/safe/target", overwrite: false, recursive
+  };
+}
+
+async function waitForTerminal(manager: OperationManager, operationId: string): Promise<void> {
+  const terminal = new Set(["completed", "failed", "partial_failure", "timed_out", "cancelled", "unknown"]);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (terminal.has(manager.get(operationId).state)) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("等待操作终态超时");
+}

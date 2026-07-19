@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import {
   createMcpOperationError,
   type McpOperationError
@@ -206,7 +207,7 @@ describe("SecretRedactor", () => {
 });
 
 describe("JsonLogger", () => {
-  it("只向 stderr sink 写一行 JSON，且永不包含默认禁止的敏感内容", () => {
+  testWithIds(["SC-014"], "只向 stderr sink 写一行 JSON，且永不包含默认禁止的敏感内容", () => {
     const lines: string[] = [];
     const logger = new JsonLogger({
       write: (line) => lines.push(line)

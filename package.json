@@ -11,6 +11,9 @@
     "pretest": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "check": "npm run build && npm run typecheck && vitest run tests/unit tests/contract tests/acceptance",
+    "test:contract": "vitest run tests/contract",
+    "test:acceptance": "vitest run tests/acceptance",
     "test:integration:linux": "node scripts/run-integration.mjs linux",
     "test:integration:windows": "node scripts/run-integration.mjs windows"
   },
@@ -21,6 +24,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/inspector": "0.22.0",
     "@types/node": "^24.0.0",
     "@types/ssh2": "^1.15.5",
     "typescript": "^5.8.0",

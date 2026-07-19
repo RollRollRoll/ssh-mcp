@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import type { HostConfig } from "../../src/config/schema.js";
 import { MultiHostCoordinator } from "../../src/multihost/multi-host-coordinator.js";
 import { OperationManager, type MonotonicClock, type OperationSnapshot } from "../../src/operations/operation-manager.js";
@@ -6,7 +7,7 @@ import { OperationManager, type MonotonicClock, type OperationSnapshot } from ".
 const hosts = Array.from({ length: 11 }, (_value, index) => host(`host-${index + 1}`));
 
 describe("MultiHostCoordinator", () => {
-  it("2 台并行成功时保留独立结果并聚合为 completed", async () => {
+  testWithIds(["SC-046"], "2 台并行成功时保留独立结果并聚合为 completed", async () => {
     const { manager, coordinator, start } = harness({ "host-1": "completed", "host-2": "completed" });
     const outer = coordinator.start(options(hosts.slice(0, 2), "parallel", start));
 
@@ -20,7 +21,7 @@ describe("MultiHostCoordinator", () => {
     });
   });
 
-  it("sequential 严格等待前一台终态后才启动下一台", async () => {
+  testWithIds(["SC-047"], "sequential 严格等待前一台终态后才启动下一台", async () => {
     const manager = new OperationManager({ idFactory: sequence("outer", "one", "two") });
     const coordinator = new MultiHostCoordinator(manager);
     const started: string[] = [];
@@ -42,17 +43,29 @@ describe("MultiHostCoordinator", () => {
     expect(started).toEqual(["host-1", "host-2"]);
   });
 
-  it("一台失败仍收集已启动主机，整体为 partial_failure", async () => {
+  testWithIds(["SC-049", "MN-010"], "真实多主机部分失败保留成功结果，且不重试、不回滚", async () => {
+    const calls = new Map<string, number>();
     const { manager, coordinator, start } = harness({ "host-1": "failed", "host-2": "completed" });
-    const outer = coordinator.start(options(hosts.slice(0, 2), "parallel", start));
+    const outer = coordinator.start(options(hosts.slice(0, 2), "parallel", (target) => {
+      calls.set(target.alias, (calls.get(target.alias) ?? 0) + 1);
+      return start(target);
+    }));
 
-    await expect(terminal(manager, outer.operationId)).resolves.toMatchObject({
+    const result = await terminal(manager, outer.operationId);
+    expect(result).toMatchObject({
       state: "partial_failure",
-      result: { hosts: [{ host: "host-1", state: "failed" }, { host: "host-2", state: "completed" }] }
+      result: { hosts: [
+        { host: "host-1", state: "failed" },
+        { host: "host-2", state: "completed", result: { host: "host-2" } }
+      ] }
+    });
+    expect(calls).toEqual(new Map([["host-1", 1], ["host-2", 1]]));
+    expect(manager.get(result.result!.hosts[1]!.operationId as string)).toMatchObject({
+      state: "completed", result: { host: "host-2" }
     });
   });
 
-  it("取消 sequential 时不启动剩余主机，并保留已取消项", async () => {
+  testWithIds(["SC-050"], "取消 sequential 时不启动剩余主机，并保留已取消项", async () => {
     const manager = new OperationManager({ idFactory: sequence("outer", "one") });
     const coordinator = new MultiHostCoordinator(manager);
     const started: string[] = [];
@@ -78,7 +91,7 @@ describe("MultiHostCoordinator", () => {
     expect(started).toEqual(["host-1"]);
   });
 
-  it("允许 10 台，拒绝 11 台且零子操作", () => {
+  testWithIds(["SC-048"], "允许 10 台，拒绝 11 台且零子操作", () => {
     const manager = new OperationManager({ idFactory: sequence("outer") });
     const coordinator = new MultiHostCoordinator(manager);
     let starts = 0;

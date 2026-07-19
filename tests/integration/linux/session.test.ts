@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { SessionManager } from "../../../src/sessions/session-manager.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
@@ -50,7 +51,7 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH session PTY 会话", () => {
-  it("真实启动登记 bash，保持 cwd/env，应用远端尺寸并隔离两个独占 Shell", async () => {
+  testWithIds(["SC-027", "SC-028", "SC-030"], "真实启动登记 bash，保持 cwd/env，应用远端尺寸并隔离两个独占 Shell", async () => {
     const manager = new SessionManager({ idFactory: sequence("session-a", "session-b") });
     const adapter = createAdapter();
     const first = await open(manager, adapter, host(), "session-a");

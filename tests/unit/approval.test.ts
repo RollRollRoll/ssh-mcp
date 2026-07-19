@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import {
   ApprovalService,
   type ApprovalClient,
@@ -15,7 +16,7 @@ import {
 } from "../../src/approval/operation-intent.js";
 
 describe("OperationIntent", () => {
-  it("以稳定 canonical JSON、SHA-256 摘要和深冻结绑定完整操作", () => {
+  testWithIds(["SC-018", "SC-019"], "以稳定 canonical JSON、SHA-256 摘要和深冻结绑定完整操作", () => {
     const input = approvalIntentInput();
     const intent = createOperationIntent(input);
 
@@ -67,7 +68,7 @@ describe("OperationIntent", () => {
 });
 
 describe("ApprovalService", () => {
-  it("展示同一 Intent 的完整信息，批准前不执行副作用，且批准只消费一次", async () => {
+  testWithIds(["SAFE-APPROVAL-001"], "展示同一 Intent 的完整信息，批准前不执行副作用，且批准只消费一次", async () => {
     const client = new FakeApprovalClient(true);
     const clock = new FakeClock();
     const service = new ApprovalService(client, clock);
@@ -194,27 +195,36 @@ describe("ApprovalService", () => {
     expect(sideEffects.calls).toBe(0);
   });
 
-  it("两分钟超时会中止审批且不执行副作用", async () => {
-    const client = new FakeApprovalClient(true);
-    const clock = new FakeClock();
-    const service = new ApprovalService(client, clock);
-    const sideEffects = new SideEffectProbe();
-    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run());
+  testWithIds(["SC-020"], "审批拒绝与两分钟超时均中止流程且副作用为零", async () => {
+    const declinedClient = new FakeApprovalClient(true);
+    const declinedSideEffects = new SideEffectProbe();
+    const declined = new ApprovalService(declinedClient, new FakeClock()).execute(
+      createOperationIntent(approvalIntentInput()),
+      () => declinedSideEffects.run()
+    );
     await Promise.resolve();
-
-    clock.advance(120_000);
-
-    await expect(pending).resolves.toMatchObject({
+    declinedClient.resolve({ action: "decline" });
+    await expect(declined).resolves.toMatchObject({
       approved: false,
-      error: {
-        code: "APPROVAL_TIMEOUT",
-        finalState: "timed_out",
-        retriable: false,
-        sideEffects: "none"
-      }
+      error: { code: "APPROVAL_DECLINED", finalState: "failed", retriable: false, sideEffects: "none" }
     });
-    expect(client.signal?.aborted).toBe(true);
-    expect(sideEffects.calls).toBe(0);
+    expect(declinedSideEffects.calls).toBe(0);
+
+    const timeoutClient = new FakeApprovalClient(true);
+    const clock = new FakeClock();
+    const timeoutSideEffects = new SideEffectProbe();
+    const timedOut = new ApprovalService(timeoutClient, clock).execute(
+      createOperationIntent(approvalIntentInput()),
+      () => timeoutSideEffects.run()
+    );
+    await Promise.resolve();
+    clock.advance(120_000);
+    await expect(timedOut).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_TIMEOUT", finalState: "timed_out", retriable: false, sideEffects: "none" }
+    });
+    expect(timeoutClient.signal?.aborted).toBe(true);
+    expect(timeoutSideEffects.calls).toBe(0);
   });
 
   it("审批通道断链时不执行副作用", async () => {

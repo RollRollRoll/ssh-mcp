@@ -1,7 +1,8 @@
 import path from "node:path";
-import { lstat, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { buildCommand } from "../../../src/commands/command-builder.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
@@ -64,6 +65,56 @@ describe.skipIf(!enabled)("Windows OpenSSH SFTP 单文件传输", () => {
     expect(await readFile(download)).toEqual(replacement);
     expect(await parts(remoteRoot)).toEqual([]);
   });
+
+  it("IT-WINDOWS-CANCEL-FILE-01：真实 SFTP 下载由 OperationManager.cancel 停止且不留下最终文件或 part", async () => {
+    const localRoot = process.env.SSH_MCP_WINDOWS_LOCAL_ROOT ?? await mkdtemp(path.join(tmpdir(), "ssh-mcp-transfer-cancel-"));
+    const remoteRoot = required("SSH_MCP_WINDOWS_REMOTE_ROOT");
+    const remoteSource = path.win32.join(remoteRoot, `Cancel-Source-${process.pid}-${Date.now()}.bin`);
+    const localTarget = path.win32.join(localRoot, `cancelled-${process.pid}-${Date.now()}.bin`);
+    const host = windowsHost(remoteRoot);
+    const manager = new OperationManager({
+      idFactory: () => "windows-file-cancel",
+      limits: { cancelConfirmationTimeoutMs: 10_000 }
+    });
+    const confirmation: TrustConfirmation = { supportsForm: () => true, confirm: async () => "accept" };
+    const adapter = new SshAdapter(
+      new StrictHostKeyVerifier(new TrustStore(path.win32.join(localRoot, "cancel-trust.json")), confirmation)
+    );
+    const service = new TransferService(manager, new SftpTransferBackend(adapter, [localRoot], { localPlatform: "win32" }));
+
+    await executeRemotePowerShell(adapter, host, [
+      `$file = [IO.File]::Open('${quotePowerShell(remoteSource)}', [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)`,
+      "try { $file.SetLength(1073741824) } finally { $file.Dispose() }"
+    ].join("; "));
+    try {
+      const operation = service.start({
+        direction: "download", host, source: remoteSource, target: localTarget, overwrite: false
+      });
+      await waitForTransferStart(manager, operation.operationId);
+
+      expect(manager.cancel(operation.operationId).state).toBe("running");
+      await terminal(manager, operation.operationId);
+      expect(manager.get(operation.operationId)).toMatchObject({
+        state: "cancelled",
+        result: {
+          completedItems: 0,
+          temporaryCleanup: "removed",
+          finalTargetCommit: "not_committed",
+          stopRequested: true,
+          stopReason: "cancel"
+        }
+      });
+      expect(await exists(localTarget)).toBe(false);
+      expect(await parts(localRoot)).toEqual([]);
+    } finally {
+      await executeRemotePowerShell(
+        adapter,
+        host,
+        `Remove-Item -LiteralPath '${quotePowerShell(remoteSource)}' -Force -ErrorAction SilentlyContinue`
+      );
+      await rm(localTarget, { force: true });
+    }
+  });
 });
 
 function windowsHost(remoteRoot: string): HostConfig {
@@ -87,4 +138,41 @@ async function terminal(manager: OperationManager, id: string): Promise<void> {
   }
   throw new Error("Windows 传输未在期限内结束");
 }
+async function waitForTransferStart(manager: OperationManager, operationId: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const snapshot = manager.get(operationId);
+    if (snapshot.state === "running" && Number(snapshot.result?.transferredBytes ?? 0) > 0) return;
+    if (["completed", "failed", "timed_out", "cancelled", "unknown"].includes(snapshot.state)) {
+      throw new Error(`Windows SFTP 在取消前已终结为 ${snapshot.state}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Windows SFTP 取消用例未在期限内开始传输");
+}
+async function executeRemotePowerShell(adapter: SshAdapter, host: HostConfig, script: string): Promise<void> {
+  const connection = await adapter.connect(host);
+  try {
+    await new Promise<void>((resolve, reject) => connection.exec(buildCommand(host, script), (error, channel) => {
+      if (error !== undefined) { reject(error); return; }
+      let stderr = "";
+      let settled = false;
+      channel.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+      channel.on("error", (channelError) => {
+        if (settled) return;
+        settled = true;
+        reject(channelError);
+      });
+      channel.on("close", (code: number | null | undefined) => {
+        if (settled) return;
+        settled = true;
+        if (code === 0) resolve();
+        else reject(new Error(`Windows 远端 PowerShell 失败(${code ?? -1}): ${stderr}`));
+      });
+    }));
+  } finally {
+    connection.close();
+  }
+}
+function quotePowerShell(value: string): string { return value.replace(/'/g, "''"); }
 function sequence(...ids: string[]): () => string { return () => ids.shift() ?? `extra-${Date.now()}`; }

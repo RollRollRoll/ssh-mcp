@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import { loadConfigFromYaml } from "../../src/config/loader.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { createServer } from "../../src/server.js";
@@ -37,7 +38,7 @@ describe("hosts_list", () => {
     await Promise.all(closers.splice(0).map((close) => close()));
   });
 
-  it("按别名字典序只返回公开状态，且不主动连接", async () => {
+  testWithIds(["SC-004"], "按别名字典序只返回公开状态，且不主动连接", async () => {
     const registry = new HostRegistry(config.hosts);
     const { client } = await connect(registry);
 

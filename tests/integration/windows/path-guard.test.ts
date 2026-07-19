@@ -10,11 +10,8 @@ import { WindowsPathGuard } from "../../../src/paths/windows-path-guard.js";
 import { WindowsReparseProbe } from "../../../src/paths/windows-reparse-probe.js";
 
 const executeFile = promisify(execFile);
-const secondDrive = process.env.SSH_MCP_WINDOWS_SECOND_DRIVE;
-const itWithSecondDrive = secondDrive === undefined ? it.skip : it;
-
-describe("Windows 路径守卫真实探针", () => {
-  it.skipIf(!windowsPathGuardAvailable())("在受控目录建立普通目录、junction 和 symlink；固定探针与 PathGuard 都关闭拒绝重解析点", async () => {
+describe.skipIf(!windowsPathGuardAvailable())("Windows 路径守卫真实探针", () => {
+  it("在受控目录建立普通目录、junction 和 symlink；固定探针与 PathGuard 都关闭拒绝重解析点", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "ssh-mcp-path-guard-"));
     const target = path.join(directory, "target");
     const junction = path.join(directory, "junction");
@@ -49,20 +46,25 @@ describe("Windows 路径守卫真实探针", () => {
     }
   });
 
-  it.skipIf(!windowsPathGuardAvailable())("配置第二盘符时必须使用盘符根格式", () => {
-    if (secondDrive !== undefined) expect(secondDrive).toMatch(/^[A-Za-z]:\\$/);
+  it("配置第二盘符时必须使用盘符根格式且与本地根不同", () => {
+    const secondDrive = requiredSecondDrive();
+    const localRoot = requiredEnvironment("SSH_MCP_WINDOWS_LOCAL_ROOT");
+    expect(secondDrive).toMatch(/^[A-Za-z]:\\$/);
+    expect(secondDrive.toLocaleLowerCase("en-US"))
+      .not.toBe(path.win32.parse(localRoot).root.toLocaleLowerCase("en-US"));
   });
 
-  itWithSecondDrive.skipIf(!windowsPathGuardAvailable())("配置第二文件系统盘符时，WindowsPathGuard 词法入口关闭拒绝跨盘符请求", async () => {
+  it("配置第二文件系统盘符时，WindowsPathGuard 词法入口关闭拒绝跨盘符请求", async () => {
+    const secondDrive = requiredSecondDrive();
     expect(secondDrive).toMatch(/^[A-Za-z]:\\$/);
     const directory = await mkdtemp(path.join(tmpdir(), "ssh-mcp-path-guard-drive-"));
     try {
       const currentDrive = path.win32.parse(directory).root;
-      expect(secondDrive!.toLocaleLowerCase("en-US")).not.toBe(currentDrive.toLocaleLowerCase("en-US"));
-      expect((await lstat(secondDrive!)).isDirectory()).toBe(true);
+      expect(secondDrive.toLocaleLowerCase("en-US")).not.toBe(currentDrive.toLocaleLowerCase("en-US"));
+      expect((await lstat(secondDrive)).isDirectory()).toBe(true);
 
       const guard = new WindowsPathGuard([directory], new GenericWindowsSftpMetadataPort(), realPowerShellProbe());
-      await expect(guard.verify(path.win32.join(secondDrive!, "ssh-mcp-path-guard-outside")))
+      await expect(guard.verify(path.win32.join(secondDrive, "ssh-mcp-path-guard-outside")))
         .rejects.toMatchObject({ code: ErrorCodes.PATH_DENIED });
     } finally {
       await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
@@ -72,6 +74,16 @@ describe("Windows 路径守卫真实探针", () => {
 
 function windowsPathGuardAvailable(): boolean {
   return process.platform === "win32" && process.env.SSH_MCP_WINDOWS_PATH_GUARD === "1";
+}
+
+function requiredSecondDrive(): string {
+  return requiredEnvironment("SSH_MCP_WINDOWS_SECOND_DRIVE");
+}
+
+function requiredEnvironment(name: string): string {
+  const value = process.env[name]?.trim();
+  if (value === undefined || value.length === 0) throw new Error(`缺少 Windows 路径集成环境变量 ${name}`);
+  return value;
 }
 
 function realPowerShellProbe(): WindowsReparseProbe {

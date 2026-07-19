@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import { buildCommand } from "../../../src/commands/command-builder.js";
 import { CommandRunner } from "../../../src/commands/command-runner.js";
 import type { HostConfig } from "../../../src/config/schema.js";
@@ -25,7 +26,7 @@ describe("Windows OpenSSH command", () => {
     expect(actual).not.toContain(" -lc ");
   });
 
-  it.skipIf(!windowsIntegrationAvailable())("受支持 Windows runner 执行真实 OpenSSH 和 UTF-16LE 命令", async () => {
+  testWithIds.skipIf(!windowsIntegrationAvailable())(["SC-052"], "受支持 Windows runner 执行真实 OpenSSH 和 UTF-16LE 命令", async () => {
     const manager = new OperationManager({ idFactory: () => "windows-command" });
     const confirmation: TrustConfirmation = { supportsForm: () => true, confirm: async () => "accept" };
     const runner = new CommandRunner(
@@ -87,6 +88,35 @@ describe("Windows OpenSSH command", () => {
   });
 });
 
+describe.skipIf(!windowsIntegrationAvailable())("Windows OpenSSH 命令取消", () => {
+  it("IT-WINDOWS-CANCEL-COMMAND-01：真实长命令由 OperationManager.cancel 停止并确认终态", async () => {
+    const manager = new OperationManager({
+      idFactory: () => "windows-command-cancel",
+      limits: { cancelConfirmationTimeoutMs: 10_000 }
+    });
+    const confirmation: TrustConfirmation = { supportsForm: () => true, confirm: async () => "accept" };
+    const runner = new CommandRunner(
+      new SshAdapter(new StrictHostKeyVerifier(new TrustStore(requiredEnv("SSH_MCP_WINDOWS_TRUST_STORE")), confirmation)),
+      manager
+    );
+    const operation = runner.start(
+      windowsIntegrationHost(),
+      "Write-Output 'cancel-ready'; [Console]::Out.Flush(); Start-Sleep -Seconds 120; Write-Output 'cancel-side-effect'"
+    );
+
+    await waitForOutput(manager, operation.operationId, "cancel-ready");
+    expect(manager.cancel(operation.operationId).state).toBe("running");
+    await waitForTerminal(manager, operation.operationId);
+    const snapshot = manager.get(operation.operationId);
+    expect(snapshot).toMatchObject({
+      state: "cancelled",
+      result: { host: "windows-openssh", platform: "windows" }
+    });
+    expect(snapshot.frames.map((frame) => frame.data).join(""))
+      .not.toContain("cancel-side-effect");
+  });
+});
+
 function windowsIntegrationAvailable(): boolean {
   return process.platform === "win32" && [
     "SSH_MCP_WINDOWS_HOST",
@@ -125,6 +155,19 @@ async function waitForTerminal(manager: OperationManager, operationId: string): 
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("Windows OpenSSH 命令未在期限内结束");
+}
+
+async function waitForOutput(manager: OperationManager, operationId: string, expected: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const snapshot = manager.get(operationId);
+    if (snapshot.frames.some((frame) => frame.data.includes(expected))) return;
+    if (["completed", "failed", "timed_out", "cancelled", "unknown"].includes(snapshot.state)) {
+      throw new Error(`Windows OpenSSH 命令在输出 ${expected} 前已终结为 ${snapshot.state}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Windows OpenSSH 命令未输出 ${expected}`);
 }
 
 async function runToTerminal(runner: CommandRunner, manager: OperationManager, host: HostConfig, command: string): Promise<void> {

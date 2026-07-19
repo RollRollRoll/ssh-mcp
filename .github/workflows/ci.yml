@@ -1,0 +1,232 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux contract and OpenSSH integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:contract
+      - run: npm run test:integration:linux
+      - run: npm run test:acceptance
+
+  windows:
+    name: Windows OpenSSH integration
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: 配置受控 Windows OpenSSH Server/SFTP 测试账户
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Windows OpenSSH 集成必须在管理员权限下配置'
+          }
+
+          $statePath = Join-Path $env:RUNNER_TEMP 'ssh-mcp-windows-job-state.json'
+          $state = [ordered]@{
+            CapabilityInstalledByJob = $false
+            UserCreatedByJob = $false
+            UserName = ''
+            HomePath = ''
+            LocalRoot = ''
+            KeyPath = ''
+            TrustStorePath = ''
+            SftpBatchPath = ''
+            FirewallRuleCreatedByJob = $false
+            FirewallRuleName = ''
+            SshdStartedByJob = $false
+            SshdInitialStatus = ''
+            SshdInitialStartMode = ''
+            SshdConfigChangedByJob = $false
+            SshdConfigPath = ''
+            SshdConfigBackupPath = ''
+          }
+          function Save-JobState {
+            $state | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $statePath -Encoding utf8
+          }
+          "SSH_MCP_WINDOWS_JOB_STATE=$statePath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Save-JobState
+
+          $openSshServer = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+          if ($openSshServer.State -ne 'Installed') {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+            $state.CapabilityInstalledByJob = $true
+            Save-JobState
+          }
+
+          $service = Get-Service -Name sshd -ErrorAction Stop
+          $serviceConfiguration = Get-CimInstance Win32_Service -Filter "Name='sshd'"
+          $state.SshdInitialStatus = $service.Status.ToString()
+          $state.SshdInitialStartMode = $serviceConfiguration.StartMode
+          $state.SshdConfigPath = Join-Path $env:ProgramData 'ssh\sshd_config'
+          $state.SshdConfigBackupPath = Join-Path $env:RUNNER_TEMP 'ssh-mcp-sshd_config.backup'
+          $sshdConfiguration = Get-Content -LiteralPath $state.SshdConfigPath -Raw -ErrorAction Stop
+          $sftpSubsystems = [regex]::Matches($sshdConfiguration, '(?im)^[ \t]*Subsystem[ \t]+sftp[ \t]+([^\r\n#]+)')
+          if ($sftpSubsystems.Count -eq 0) {
+            Copy-Item -LiteralPath $state.SshdConfigPath -Destination $state.SshdConfigBackupPath -Force
+            Add-Content -LiteralPath $state.SshdConfigPath -Value "`r`nSubsystem sftp sftp-server.exe"
+            $state.SshdConfigChangedByJob = $true
+          } elseif ($sftpSubsystems.Count -ne 1 -or $sftpSubsystems[0].Groups[1].Value -notmatch '(?i)(?:^|[\\/ ])(?:internal-sftp|sftp-server(?:\.exe)?)(?:$|[ \t])') {
+            throw 'sshd_config 的 Subsystem sftp 配置不受支持'
+          }
+          Save-JobState
+
+          $runToken = "$env:GITHUB_RUN_ID$env:GITHUB_RUN_ATTEMPT"
+          if ($runToken.Length -gt 12) { $runToken = $runToken.Substring($runToken.Length - 12) }
+          $userName = "sshmcp$runToken"
+          if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
+            throw "拒绝复用既有本地账户 $userName"
+          }
+          $password = ConvertTo-SecureString ("ci-" + [Guid]::NewGuid().ToString('N') + "-Aa1!") -AsPlainText -Force
+          New-LocalUser -Name $userName -Password $password -PasswordNeverExpires -AccountNeverExpires -UserMayNotChangePassword | Out-Null
+          $state.UserCreatedByJob = $true
+          $state.UserName = $userName
+          $home = Join-Path 'C:\Users' $userName
+          $state.HomePath = $home
+          Save-JobState
+          $sshDirectory = Join-Path $home '.ssh'
+          $remoteRoot = Join-Path $home 'ssh-mcp'
+          $localRoot = Join-Path $env:RUNNER_TEMP "ssh-mcp-local-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $state.LocalRoot = $localRoot
+          New-Item -ItemType Directory -Force -Path $sshDirectory, $remoteRoot, $localRoot | Out-Null
+          $key = Join-Path $env:RUNNER_TEMP "ssh-mcp-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-ed25519"
+          $state.KeyPath = $key
+          $state.TrustStorePath = Join-Path $localRoot 'trust.json'
+          $state.SftpBatchPath = Join-Path $env:RUNNER_TEMP "ssh-mcp-sftp-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.txt"
+          Save-JobState
+          & ssh-keygen.exe -q -t ed25519 -N '""' -f $key
+          Copy-Item "$key.pub" (Join-Path $sshDirectory 'authorized_keys')
+          icacls.exe $sshDirectory /inheritance:r /grant:r "${userName}:(OI)(CI)F" /grant:r 'SYSTEM:(OI)(CI)F' | Out-Null
+          icacls.exe (Join-Path $sshDirectory 'authorized_keys') /inheritance:r /grant:r "${userName}:F" /grant:r 'SYSTEM:F' | Out-Null
+          icacls.exe $remoteRoot /grant:r "${userName}:(OI)(CI)F" | Out-Null
+
+          $officialFirewallRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+          $firewallReady = $false
+          if ($null -ne $officialFirewallRule -and $officialFirewallRule.Enabled -eq 'True' -and
+              $officialFirewallRule.Direction -eq 'Inbound' -and $officialFirewallRule.Action -eq 'Allow') {
+            $firewallReady = @($officialFirewallRule | Get-NetFirewallPortFilter | Where-Object {
+              $_.Protocol -eq 'TCP' -and $_.LocalPort -eq '22'
+            }).Count -gt 0
+          }
+          if (-not $firewallReady) {
+            $firewallRuleName = "SSH-MCP-CI-OpenSSH-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            New-NetFirewallRule -Name $firewallRuleName -DisplayName $firewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 -Profile Any | Out-Null
+            $state.FirewallRuleCreatedByJob = $true
+            $state.FirewallRuleName = $firewallRuleName
+            Save-JobState
+          }
+
+          if ($state.SshdInitialStartMode -eq 'Disabled') { Set-Service -Name sshd -StartupType Manual }
+          if ($state.SshdInitialStatus -eq 'Running') {
+            if ($state.SshdConfigChangedByJob) { Restart-Service -Name sshd -Force }
+          } else {
+            Start-Service -Name sshd
+            $state.SshdStartedByJob = $true
+            Save-JobState
+          }
+
+          $portReady = $false
+          $portDeadline = (Get-Date).AddSeconds(30)
+          do {
+            $portReady = Test-NetConnection -ComputerName 127.0.0.1 -Port 22 -InformationLevel Quiet -WarningAction SilentlyContinue
+            if (-not $portReady) { Start-Sleep -Milliseconds 250 }
+          } until ($portReady -or (Get-Date) -ge $portDeadline)
+          if (-not $portReady) { throw 'Windows OpenSSH 端口 22 未就绪' }
+
+          "pwd`nquit" | Set-Content -LiteralPath $state.SftpBatchPath -Encoding ascii
+          & sftp.exe -q -b $state.SftpBatchPath -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 -i $key -P 22 "${userName}@127.0.0.1"
+          if ($LASTEXITCODE -ne 0) { throw "Windows OpenSSH SFTP 未就绪（exit=$LASTEXITCODE）" }
+
+          $localDrive = [IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path).TrimEnd('\')
+          $systemDrive = $env:SystemDrive.TrimEnd('\')
+          if ($localDrive -eq $systemDrive) {
+            throw 'Windows 集成要求 RUNNER_TEMP 与 SystemDrive 位于不同真实盘符'
+          }
+          $systemDisk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$systemDrive'"
+          if ($null -eq $systemDisk -or $systemDisk.DriveType -ne 3) {
+            throw "SystemDrive 不是可用的真实固定文件系统盘符：$systemDrive"
+          }
+          $secondDrive = "$systemDrive\"
+          if (-not (Test-Path -LiteralPath $secondDrive -PathType Container)) { throw "第二盘符不可访问：$secondDrive" }
+
+          "SSH_MCP_WINDOWS_INTEGRATION=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_PATH_GUARD=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_HOST=127.0.0.1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_PORT=22" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_USER=$userName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_USERNAME=$userName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_PRIVATE_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_TRUST_STORE=$($state.TrustStorePath)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_SHELL=powershell.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_POWERSHELL=powershell.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_LOCAL_ROOT=$localRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_REMOTE_ROOT=$remoteRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSH_MCP_WINDOWS_SECOND_DRIVE=$secondDrive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: npm run check
+      - run: npm run test:contract
+      - run: npm run test:integration:windows
+      - run: npm run test:acceptance
+      - name: 清理本 job 创建的 Windows OpenSSH 资源
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $statePath = $env:SSH_MCP_WINDOWS_JOB_STATE
+          if ([string]::IsNullOrWhiteSpace($statePath) -or -not (Test-Path -LiteralPath $statePath)) { exit 0 }
+          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+
+          if ($state.SshdStartedByJob -and (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+            Stop-Service -Name sshd -Force -ErrorAction Continue
+          }
+          if ($state.UserCreatedByJob -and -not [string]::IsNullOrWhiteSpace($state.UserName)) {
+            Remove-LocalUser -Name $state.UserName -ErrorAction Continue
+          }
+          foreach ($target in @($state.HomePath, $state.LocalRoot, $state.KeyPath, "$($state.KeyPath).pub", $state.TrustStorePath, $state.SftpBatchPath)) {
+            if (-not [string]::IsNullOrWhiteSpace($target)) {
+              Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Continue
+            }
+          }
+          if ($state.FirewallRuleCreatedByJob -and -not [string]::IsNullOrWhiteSpace($state.FirewallRuleName)) {
+            Remove-NetFirewallRule -Name $state.FirewallRuleName -ErrorAction Continue
+          }
+          if ($state.SshdConfigChangedByJob -and (Test-Path -LiteralPath $state.SshdConfigBackupPath)) {
+            Copy-Item -LiteralPath $state.SshdConfigBackupPath -Destination $state.SshdConfigPath -Force -ErrorAction Continue
+            if ($state.SshdInitialStatus -eq 'Running') { Restart-Service -Name sshd -Force -ErrorAction Continue }
+          }
+          if (-not $state.CapabilityInstalledByJob) {
+            switch ($state.SshdInitialStartMode) {
+              'Auto' { Set-Service -Name sshd -StartupType Automatic -ErrorAction Continue }
+              'Manual' { Set-Service -Name sshd -StartupType Manual -ErrorAction Continue }
+              'Disabled' { Set-Service -Name sshd -StartupType Disabled -ErrorAction Continue }
+            }
+          }
+          if ($state.CapabilityInstalledByJob) {
+            Stop-Service -Name sshd -Force -ErrorAction Continue
+            Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Continue | Out-Null
+          }
+          if (-not [string]::IsNullOrWhiteSpace($state.SshdConfigBackupPath)) {
+            Remove-Item -LiteralPath $state.SshdConfigBackupPath -Force -ErrorAction Continue
+          }
+          Remove-Item -LiteralPath $statePath -Force -ErrorAction Continue

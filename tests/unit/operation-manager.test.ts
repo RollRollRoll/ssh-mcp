@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import {
   OperationManager,
   type MonotonicClock,
@@ -117,7 +118,7 @@ describe("OperationManager", () => {
     expect(runner.cancelCalls).toBe(1);
   });
 
-  it("超时也需停止确认；超时取消未确认时为不可重试 unknown", () => {
+  testWithIds(["SC-034"], "超时也需停止确认；超时取消未确认时为不可重试 unknown", () => {
     const clock = new FakeClock();
     const runner = new FakeRunner();
     const manager = new OperationManager({ clock, idFactory: () => "timeout" });

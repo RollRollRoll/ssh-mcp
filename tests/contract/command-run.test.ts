@@ -1,13 +1,19 @@
+import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HostConfig } from "../../src/config/schema.js";
+import { testWithIds } from "../test-with-ids.js";
+import type { HostConfig, LowRiskProfile } from "../../src/config/schema.js";
 import { buildCommand } from "../../src/commands/command-builder.js";
 import { CommandRunner } from "../../src/commands/command-runner.js";
 import type { OperationIntent } from "../../src/approval/operation-intent.js";
+import { ErrorCodes } from "../../src/errors/error-codes.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager } from "../../src/operations/operation-manager.js";
+import { lexicalPathHandle } from "../../src/paths/path-guard.js";
+import { PolicyEngine } from "../../src/policy/policy-engine.js";
 import { createServer } from "../../src/server.js";
+import { runPlatformProbe } from "../../src/ssh/platform-probe.js";
 
 const linux: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22,
@@ -25,11 +31,33 @@ describe("command_run 命令构造", () => {
     );
   });
 
-  it("Windows 保留原始 PowerShell 文本，只使用 UTF-16LE EncodedCommand", () => {
+  testWithIds(["SC-025", "MN-013"], "命令、路径和低风险规则均不跨平台翻译", async () => {
     const actual = buildCommand(windows, "Write-Output '中文'\r\n$env:Path");
     const encoded = actual.split(" ").at(-1);
     expect(actual).toBe('"C:\\Program Files\\PowerShell\\pwsh.exe" -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + encoded);
     expect(Buffer.from(encoded!, "base64").toString("utf16le")).toBe("Write-Output '中文'\r\n$env:Path");
+
+    expect(() => lexicalPathHandle("C:\\Data\\input.txt", linux.remoteRoots, "posix"))
+      .toThrow(expect.objectContaining({ code: ErrorCodes.PATH_DENIED }));
+
+    const linuxOnlyProfile: LowRiskProfile = {
+      id: "linux-only", hostAliases: ["windows"], platform: "linux", executable: "/usr/bin/du", fixedArgs: [], parameters: []
+    };
+    expect(new PolicyEngine([linuxOnlyProfile]).evaluate({ profileId: "linux-only", host: windows, parameters: {} }))
+      .toMatchObject({ matched: false, error: { code: ErrorCodes.POLICY_REQUIRES_APPROVAL, sideEffects: "none" } });
+
+    const mismatch = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+    mismatch.stderr = new EventEmitter();
+    const probe = runPlatformProbe({
+      exec: (_command, callback) => {
+        callback(undefined, mismatch as never);
+        setImmediate(() => {
+          mismatch.emit("data", "SSH_MCP_PLATFORM=windows\nSSH_MCP_SHELL=powershell\nSSH_MCP_PS_MAJOR=7\n");
+          mismatch.emit("close", 0, undefined);
+        });
+      }
+    }, linux);
+    await expect(probe).rejects.toMatchObject({ code: ErrorCodes.PLATFORM_MISMATCH });
   });
 });
 
@@ -37,7 +65,7 @@ describe("command_run MCP 契约", () => {
   const closers: Array<() => Promise<void>> = [];
   afterEach(async () => { await Promise.all(closers.splice(0).map((close) => close())); });
 
-  it("在任何审批、操作或连接前拒绝空命令、额外字段和未知主机", async () => {
+  testWithIds(["SC-006", "SC-023", "MN-006"], "在任何审批、操作或连接前拒绝非法请求、通配符、动态组和超过10台", async () => {
     let approvals = 0;
     let connections = 0;
     const { client } = await connect({
@@ -49,6 +77,10 @@ describe("command_run MCP 契约", () => {
     await expect(client.callTool({ name: "command_run", arguments: { hosts: ["missing"], command: "echo ok" } })).resolves.toMatchObject({
       isError: true, structuredContent: { error: { code: "HOST_NOT_REGISTERED", sideEffects: "none" } }
     });
+    for (const hosts of [["*"], ["group:dynamic"], Array.from({ length: 11 }, (_value, index) => `host-${index}`)]) {
+      await expect(client.callTool({ name: "command_run", arguments: { hosts, command: "echo never" } }))
+        .resolves.toMatchObject({ isError: true });
+    }
     expect(approvals).toBe(0);
     expect(connections).toBe(0);
   });

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { ErrorCodes } from "../../../src/errors/error-codes.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
@@ -42,7 +43,7 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH connection", () => {
-  it("覆盖首次信任、一致信任、主机密钥变化、认证成功/失败与连接超时", async () => {
+  testWithIds(["SC-008", "SC-010", "SC-011", "SC-012", "SC-013", "SC-055", "MN-011"], "覆盖首次信任、一致信任、主机密钥变化、认证成功/失败与连接超时", async () => {
     const trustStore = new TrustStore(join(workDirectory, "trust.json"));
     let confirmations = 0;
     const accepting: TrustConfirmation = {

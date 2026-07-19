@@ -251,7 +251,7 @@
   - 工具清单只有设计定义的 12 个 MCP 工具，没有规则写入、凭据管理、动态主机、转发、恢复、审计、HTTP 或 UI 入口。
 - 验证方式：`npm ci && npm run check && npm run test:contract && npm run test:integration:linux && npm run test:acceptance`；在 Windows runner 执行 `npm run test:integration:windows`；CI 两个 job 均通过。
 - 覆盖：设计 3.7、3.8、4、15、16、18、21；规格全部成功标准、Requirement「MCP 行为与输入校验」「结果与错误契约」及全部 MUST NOT 的最终回归。
-- [ ] 完成
+- [x] 完成
 
 ## 4. 依赖与并行视图
 

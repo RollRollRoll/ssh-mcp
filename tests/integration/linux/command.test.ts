@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import { CommandRunner } from "../../../src/commands/command-runner.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
@@ -44,7 +45,7 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH command", () => {
-  it("真实覆盖 exit 0/非零、stdout/stderr、中文 CRLF、无效 UTF-8 与有界输出", async () => {
+  testWithIds(["SC-021", "SC-022", "SC-024", "SC-051", "SC-054"], "真实覆盖 exit 0/非零、stdout/stderr、中文 CRLF、无效 UTF-8 与有界输出", async () => {
     const manager = new OperationManager({ idFactory: sequence("ok", "bad"), outputBufferBytes: 128 });
     const runner = createRunner(manager);
     const ok = runner.start(host(), "printf '中文\\r\\n'; printf '错误\\r\\n' >&2");

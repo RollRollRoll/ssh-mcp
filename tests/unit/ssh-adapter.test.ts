@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import type { ConnectConfig } from "ssh2";
 import type { HostConfig } from "../../src/config/schema.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
@@ -85,7 +86,7 @@ describe("platform probe", () => {
     expect(client.commands[0]).toContain("uname -s");
   });
 
-  it("退出码、marker 或总输出超过 4KiB 时返回 PLATFORM_MISMATCH", async () => {
+  testWithIds(["SC-053"], "退出码、marker 或总输出超过 4KiB 时返回 PLATFORM_MISMATCH", async () => {
     const client = new FakeClient();
     let channel: FakeChannel | undefined;
     client.exec = ((_command: string, callback: (error: Error | undefined, channel: FakeChannel) => void) => {

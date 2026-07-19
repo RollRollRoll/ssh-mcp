@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
 import {
   HOST_CONFIRMATION_TIMEOUT_MS,
@@ -191,7 +192,7 @@ describe("StrictHostKeyVerifier", () => {
     expect(calls).toBe(0);
   });
 
-  it("拒绝、取消、不支持和 120000ms 超时均关闭失败且不写信任", async () => {
+  testWithIds(["SC-009"], "拒绝、取消、不支持和 120000ms 超时均关闭失败且不写信任", async () => {
     const path = await temporaryStorePath();
     const store = new TrustStore(path);
     const timers: Array<() => void> = [];

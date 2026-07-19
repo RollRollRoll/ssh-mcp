@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
@@ -43,7 +44,7 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH SFTP 单文件传输", () => {
-  it("上传/下载二进制内容一致，真实进度精确，并覆盖目标存在与原子替换", async () => {
+  testWithIds(["SC-038", "SC-041", "SC-042", "SC-045"], "上传/下载二进制内容一致，真实进度精确，并覆盖目标存在与原子替换", async () => {
     const content = Buffer.concat([Buffer.from([0, 255, 13, 10]), Buffer.from("中文\n"), Buffer.alloc(96_000, 0xa5)]);
     const localSource = join(workDirectory, "source.bin");
     const localDownload = join(workDirectory, "download.bin");

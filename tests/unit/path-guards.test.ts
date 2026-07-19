@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
 import { LocalPathGuard, PathGuardError, lexicalPathHandle, type LocalFileSystem, type PathStat } from "../../src/paths/local-path-guard.js";
 import { LinuxPathGuard, type SftpPathPort, type SftpPathStat } from "../../src/paths/linux-path-guard.js";
@@ -6,7 +7,7 @@ import { WindowsPathGuard } from "../../src/paths/windows-path-guard.js";
 import { MAX_WINDOWS_REPARSE_PROBE_PATH_LENGTH, MAX_WINDOWS_REPARSE_PROBE_PATHS, MAX_WINDOWS_REPARSE_PROBE_STDOUT_BYTES, WindowsReparseProbe, buildWindowsReparseProbeCommand, parseWindowsReparseProbeOutput, type WindowsReparseProbePort } from "../../src/paths/windows-reparse-probe.js";
 
 describe("路径守卫的纯词法入口", () => {
-  it("零 I/O 地按路径段选择唯一根，并拒绝越界、相对、NUL、.. 和混合平台语义", () => {
+  testWithIds(["SC-040"], "零 I/O 地按路径段选择唯一根，并拒绝越界、相对、NUL、.. 和混合平台语义", () => {
     let calls = 0;
     const result = lexicalPathHandle("/workspace/project/readme.txt", ["/workspace"], "posix", () => { calls += 1; });
     expect(result).toMatchObject({ requested: "/workspace/project/readme.txt", canonical: "/workspace/project/readme.txt", root: "/workspace" });

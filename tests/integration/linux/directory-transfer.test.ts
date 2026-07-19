@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Writable } from "node:stream";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testWithIds } from "../../test-with-ids.js";
 import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
@@ -45,7 +46,7 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH SFTP 递归目录传输", () => {
-  it("上传和下载嵌套空目录/二进制，顺序稳定且目标目录存在时 overwrite false/true 都拒绝", async () => {
+  testWithIds(["SC-039"], "上传和下载嵌套空目录/二进制，顺序稳定且目标目录存在时 overwrite false/true 都拒绝", async () => {
     const source = join(workDirectory, "tree-source");
     await mkdir(join(source, "a", "empty"), { recursive: true });
     await mkdir(join(source, "z-empty"), { recursive: true });
@@ -84,7 +85,7 @@ describe("Linux OpenSSH SFTP 递归目录传输", () => {
     expect(emptyCheck.stderr).toBe("");
   });
 
-  it("源树含 symlink 时拒绝且不访问指向、不创建目标", async () => {
+  testWithIds(["SC-043", "MN-009"], "拒绝链接；同一目标重试从零开始且结果不宣称保留元数据", async () => {
     const source = join(workDirectory, "link-source");
     const outside = join(workDirectory, "outside-secret");
     await mkdir(source);
@@ -97,6 +98,42 @@ describe("Linux OpenSSH SFTP 递归目录传输", () => {
     expect(manager.get(operation.operationId)).toMatchObject({ state: "failed", error: { code: "LINK_NOT_ALLOWED", sideEffects: "none" } });
     const check = await docker(["exec", containers[0]!, "test", "!", "-e", "/home/sshmcp/link-target"]);
     expect(check.stdout).toBe("");
+
+    const retrySource = join(workDirectory, "restart-source");
+    const retryBytes = Buffer.alloc(64 * 1024 * 1024, 0x6d);
+    await mkdir(retrySource);
+    await writeFile(join(retrySource, "whole.bin"), retryBytes);
+    const retryManager = new OperationManager({ idFactory: sequence("interrupted", "restarted") });
+    const retryService = createService(retryManager);
+    const retryTarget = "/home/sshmcp/retry-tree";
+    const interrupted = retryService.start(request("upload", retrySource, retryTarget, false));
+    await waitUntil(() => Number(retryManager.get(interrupted.operationId).result?.transferredBytes ?? 0) > 0);
+    retryManager.cancel(interrupted.operationId);
+    await terminal(retryManager, interrupted.operationId);
+    expect(retryManager.get(interrupted.operationId)).toMatchObject({
+      state: "cancelled", result: { succeeded: [], stopRequested: true, stopReason: "cancel" }
+    });
+
+    const interruptedCheck = await docker(["exec", containers[0]!, "test", "!", "-e", `${retryTarget}/whole.bin`]);
+    expect(interruptedCheck.stdout).toBe("");
+    await docker(["exec", containers[0]!, "rmdir", retryTarget]);
+
+    const restarted = retryService.start(request("upload", retrySource, retryTarget, false));
+    await terminal(retryManager, restarted.operationId);
+    const restartedSnapshot = retryManager.get(restarted.operationId);
+    expect(restartedSnapshot).toMatchObject({
+      state: "completed",
+      result: {
+        succeeded: ["whole.bin"],
+        aggregateTransferredBytes: retryBytes.length,
+        transferredBytes: retryBytes.length,
+        totalBytes: retryBytes.length
+      }
+    });
+    assertNoMetadataClaims(restartedSnapshot.result!);
+    const retryCheck = await docker(["exec", containers[0]!, "sh", "-c",
+      "test $(wc -c < /home/sshmcp/retry-tree/whole.bin) -eq 67108864"]);
+    expect(retryCheck.stderr).toBe("");
   });
 
   it("真实拒绝批准根及根内子挂载点，且不创建本地目标", async () => {
@@ -116,7 +153,7 @@ describe("Linux OpenSSH SFTP 递归目录传输", () => {
     }
   });
 
-  it("确定性中途失败后列出 succeeded/failed/notExecuted，保留完成文件且无半文件", async () => {
+  testWithIds(["SC-044"], "确定性中途失败后列出 succeeded/failed/notExecuted，保留完成文件且无半文件", async () => {
     const source = join(workDirectory, "failure-source");
     await mkdir(source);
     await writeFile(join(source, "a.bin"), Buffer.alloc(128 * 1024, 0x11));
@@ -216,4 +253,12 @@ async function waitForPort(targetPort: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("OpenSSH fixture 未就绪");
+}
+
+function assertNoMetadataClaims(value: unknown, path = "result"): void {
+  if (value === null || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value)) {
+    expect(key, `${path}.${key} 不得宣称保留元数据`).not.toMatch(/permission|mode|mtime|timestamp|owner|uid|gid|metadata|attributes|preserv/i);
+    assertNoMetadataClaims(nested, `${path}.${key}`);
+  }
 }

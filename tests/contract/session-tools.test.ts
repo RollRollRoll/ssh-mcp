@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import { createOperationIntent, type OperationIntent } from "../../src/approval/operation-intent.js";
 import type { HostConfig } from "../../src/config/schema.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
@@ -47,7 +48,7 @@ describe("session MCP 工具契约", () => {
     expect(connections).toBe(0);
   });
 
-  it("打开只在获批 Intent 中创建独占 PTY，读写尺寸均精确绑定并保持 raw 字节", async () => {
+  testWithIds(["SC-026"], "打开只在获批 Intent 中创建独占 PTY，读写尺寸均精确绑定并保持 raw 字节", async () => {
     const channel = new Channel();
     const intents: OperationIntent[] = [];
     const { client, connections } = await connect({

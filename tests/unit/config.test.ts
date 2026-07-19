@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { testWithIds } from "../test-with-ids.js";
 import { ConfigLoader, loadConfigFromYaml } from "../../src/config/loader.js";
 
 const baseConfig = `
@@ -24,7 +25,7 @@ hosts:
 `;
 
 describe("严格 YAML 配置加载", () => {
-  it("接受三种认证联合、1 台和 10 台唯一开发/测试主机，并默认空低风险规则", () => {
+  testWithIds(["SC-005"], "接受三种认证联合、1 台和 10 台唯一开发/测试主机，并默认空低风险规则", () => {
     const oneHost = loadConfigFromYaml(baseConfig);
     expect(oneHost.lowRiskProfiles).toEqual([]);
     expect(oneHost.hosts[0].auth).toMatchObject({ type: "agent" });
@@ -55,13 +56,17 @@ describe("严格 YAML 配置加载", () => {
     ["重复别名", baseConfig.replace("hosts:", "hosts:\n  - alias: linux-dev\n    environment: test\n    platform: linux\n    host: 192.0.2.11\n    port: 22\n    username: tester\n    auth:\n      type: pageant\n    shell:\n      type: posix\n      command: /bin/sh\n    remoteRoots:\n      - /srv/test")],
     ["零主机", baseConfig.replace(/  - alias:[\s\S]*/, "")],
     ["十一台主机", baseConfig.replace("hosts:", `hosts:${Array.from({ length: 10 }, (_, index) => `\n  - alias: extra-${index}\n    environment: test\n    platform: linux\n    host: 192.0.2.${index + 20}\n    port: 22\n    username: tester\n    auth:\n      type: pageant\n    shell:\n      type: posix\n      command: /bin/sh\n    remoteRoots:\n      - /srv/test`).join("")}`)],
-    ["非法环境", baseConfig.replace("environment: development", "environment: production")],
     ["平台与 Shell 不匹配", baseConfig.replace("type: posix", "type: powershell")],
     ["相对敏感路径", baseConfig.replace("socket: /run/user/1000/agent.sock", "socket: relative.sock")],
     ["路径含词法上级目录", baseConfig.replace("- /srv/project", "- /srv/../project")],
     ["动态密码字段", baseConfig.replace("type: agent", "type: agent\n      password: secret")]
   ])("拒绝%s", (_name, source) => {
     expect(() => loadConfigFromYaml(source)).toThrow(/配置/);
+  });
+
+  testWithIds(["SC-007", "MN-003"], "拒绝生产环境主机进入可操作配置", () => {
+    expect(() => loadConfigFromYaml(baseConfig.replace("environment: development", "environment: production")))
+      .toThrow(/配置/);
   });
 
   it("拒绝 YAML 1.1 版本指令，避免 yes 被解析为布尔值", () => {

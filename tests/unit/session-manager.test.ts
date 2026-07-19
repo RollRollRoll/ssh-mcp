@@ -1,7 +1,9 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
+import { OperationManager } from "../../src/operations/operation-manager.js";
 import { SessionManager, type SessionClock } from "../../src/sessions/session-manager.js";
+import { testWithIds } from "../test-with-ids.js";
 
 class Clock implements SessionClock {
   public nowMs = 0;
@@ -90,7 +92,7 @@ describe("SessionManager", () => {
     expect(channel.closes).toBe(1);
   });
 
-  it("远端主动 close 标记 disconnected；关闭记录保留后明确过期", async () => {
+  testWithIds(["SC-032"], "远端主动 close 标记 disconnected；关闭记录保留后明确过期", async () => {
     const clock = new Clock();
     const manager = new SessionManager({ clock, idFactory: () => "s-1", retentionMs: 5 });
     reserve(manager);
@@ -103,6 +105,32 @@ describe("SessionManager", () => {
     expectError(() => manager.get("s-1"), ErrorCodes.SESSION_EXPIRED);
   });
 
+  testWithIds(["MN-012"], "新服务生命周期不恢复旧会话或任务，旧 ID 明确 NOT_FOUND 且零重放", async () => {
+    let oldOperationCancels = 0;
+    const oldOperations = new OperationManager({ idFactory: () => "old-operation" });
+    oldOperations.create({ initialState: "running", runner: { cancel: () => { oldOperationCancels += 1; } } });
+    const oldSessions = new SessionManager({ idFactory: () => "old-session" });
+    reserve(oldSessions, "old-session");
+    const oldChannel = new Channel();
+    let oldConnectionCloses = 0;
+    oldSessions.activate("old-session", { close: () => { oldConnectionCloses += 1; } }, oldChannel);
+
+    const freshOperations = new OperationManager({ idFactory: () => "fresh-operation" });
+    const freshSessions = new SessionManager({ idFactory: () => "fresh-session" });
+    expectOperationError(() => freshOperations.get("old-operation"), ErrorCodes.OPERATION_NOT_FOUND);
+    expectOperationError(() => freshOperations.cancel("old-operation"), ErrorCodes.OPERATION_NOT_FOUND);
+    expectError(() => freshSessions.get("old-session"), ErrorCodes.SESSION_NOT_FOUND);
+    await expect(freshSessions.write("old-session", Buffer.from("不得重放")))
+      .rejects.toMatchObject({ error: { code: ErrorCodes.SESSION_NOT_FOUND } });
+    expectError(() => freshSessions.resize("old-session", 100, 40), ErrorCodes.SESSION_NOT_FOUND);
+    expectError(() => freshSessions.close("old-session"), ErrorCodes.SESSION_NOT_FOUND);
+
+    expect(oldOperationCancels).toBe(0);
+    expect(oldChannel.writes).toEqual([]);
+    expect(oldChannel.closes).toBe(0);
+    expect(oldConnectionCloses).toBe(0);
+  });
+
   it("打开失败会移除预留会话且不会污染查询空间", () => {
     const manager = new SessionManager({ idFactory: () => "s-1" });
     reserve(manager);
@@ -110,7 +138,7 @@ describe("SessionManager", () => {
     expectError(() => manager.get("s-1"), ErrorCodes.SESSION_NOT_FOUND);
   });
 
-  it("小帧超过输出容量时序号元数据随帧淘汰，截断后的 seq 仍稳定", () => {
+  testWithIds(["SC-029"], "小帧超过输出容量时序号元数据随帧淘汰，截断后的 seq 仍稳定", () => {
     const manager = new SessionManager({ idFactory: () => "s-1", outputBufferBytes: 3 });
     reserve(manager);
     const channel = new Channel();
@@ -180,7 +208,7 @@ describe("SessionManager", () => {
     expect(channel.listenerCount("drain")).toBe(0);
   });
 
-  it("同步 close 不遗留确认计时器，终态释放资源且迟到事件不可改写", () => {
+  testWithIds(["SC-031"], "同步 close 不遗留确认计时器，终态释放资源且迟到事件不可改写", () => {
     const clock = new Clock();
     const connection = { closes: 0, close() { this.closes += 1; } };
     const manager = new SessionManager({ clock, idFactory: () => "s-1", closeConfirmationTimeoutMs: 10 });
@@ -188,6 +216,7 @@ describe("SessionManager", () => {
     const channel = new Channel();
     channel.close = () => { channel.closes += 1; channel.emit("close"); };
     manager.activate("s-1", connection, channel);
+    expect(manager.close("s-1").state).toBe("closed");
     expect(manager.close("s-1").state).toBe("closed");
     clock.advance(10);
     channel.emit("exit");
@@ -203,4 +232,12 @@ function expectError(action: () => unknown, code: string): void {
     return;
   }
   throw new Error(`预期错误 ${code}`);
+}
+
+function expectOperationError(action: () => unknown, code: string): void {
+  try { action(); } catch (error: unknown) {
+    expect(error).toMatchObject({ error: { code } });
+    return;
+  }
+  throw new Error(`预期操作错误 ${code}`);
 }
