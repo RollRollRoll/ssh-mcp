@@ -3,6 +3,7 @@ import { pipeline } from "node:stream/promises";
 import type { HostConfig } from "../config/schema.js";
 import { createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
 import { ErrorCodes, isErrorCode } from "../errors/error-codes.js";
+import type { PathPlatform } from "../paths/path-guard.js";
 import {
   OperationManager,
   OperationManagerError,
@@ -12,12 +13,32 @@ import {
 
 export type TransferDirection = "upload" | "download";
 
+export interface SourceFileIdentity {
+  readonly kind: "file";
+  readonly id: string;
+  readonly size: number;
+}
+
+/** 仅供目录执行器传递的批准源树元数据，绝不来自 MCP 输入。 */
+export interface SourceMountProof {
+  readonly sourceRoot: string;
+  readonly platform: PathPlatform;
+}
+
 export interface TransferRequest {
   readonly direction: TransferDirection;
   readonly host: HostConfig;
   readonly source: string;
   readonly target: string;
   readonly overwrite: boolean;
+  /** 旧的直接单文件调用省略时等同 false；MCP 工具层始终显式绑定布尔值。 */
+  readonly recursive?: boolean;
+  /** 仅供递归目录执行器绑定枚举身份，不来自 MCP 工具输入。 */
+  readonly expectedSourceIdentity?: SourceFileIdentity;
+  /** 仅供递归目录执行器在真实源句柄打开前后复核挂载证明，不来自 MCP 工具输入。 */
+  readonly sourceMountVerifier?: (source: string) => Promise<void>;
+  /** 仅供递归目录下载让逐文件 SSH 连接自行建立挂载证明，不来自 MCP 工具输入。 */
+  readonly sourceMountProof?: SourceMountProof;
 }
 
 export interface PreparedTransfer {
@@ -37,6 +58,51 @@ export interface TransferBackend {
 export type TemporaryCleanupState = "not_needed" | "removed" | "failed" | "unknown";
 export type TransferPhase = "preparing" | "streaming" | "sealing" | "commit_started" | "committed" | "closing" | "terminal";
 export type FinalTargetCommitState = "not_committed" | "committed" | "unknown";
+
+export interface PreparedTransferRunHooks {
+  isStopping(): boolean;
+  onProgress(transferredBytes: number, totalBytes: number): void;
+  onPhase(phase: "streaming" | "sealing" | "commit_started" | "committed"): void;
+}
+
+export interface PreparedTransferRunResult {
+  readonly transferredBytes: number;
+  readonly totalBytes: number;
+  readonly temporaryCleanup: TemporaryCleanupState;
+}
+
+/** Task 10/11 共用的单普通文件流式、字节校验与原子提交核心。 */
+export async function runPreparedTransfer(
+  prepared: PreparedTransfer,
+  hooks: PreparedTransferRunHooks
+): Promise<PreparedTransferRunResult> {
+  const totalBytes = checkedSize(prepared.totalBytes);
+  let transferredBytes = 0;
+  hooks.onPhase("streaming");
+  hooks.onProgress(transferredBytes, totalBytes);
+  if (hooks.isStopping()) throw new Error("传输已停止");
+  const meter = new Transform({
+    transform: (chunk: Buffer | string, _encoding, callback) => {
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (!Number.isSafeInteger(transferredBytes + data.length)) {
+        callback(new Error("传输字节数溢出")); return;
+      }
+      transferredBytes += data.length;
+      hooks.onProgress(transferredBytes, totalBytes);
+      callback(undefined, data);
+    }
+  });
+  await pipeline(prepared.source, meter, prepared.target);
+  if (hooks.isStopping()) throw new Error("传输已停止");
+  if (transferredBytes !== totalBytes) throw new Error("源大小与实际流字节不一致");
+  hooks.onPhase("sealing");
+  await prepared.seal();
+  if (hooks.isStopping()) throw new Error("传输已停止");
+  hooks.onPhase("commit_started");
+  const temporaryCleanup = await prepared.commit() ?? "not_needed";
+  hooks.onPhase("committed");
+  return Object.freeze({ transferredBytes, totalBytes, temporaryCleanup });
+}
 
 /** operation_get 中单文件传输结果的严格字段契约。 */
 export interface TransferResult extends Readonly<Record<string, unknown>> {
@@ -128,38 +194,21 @@ class TransferExecution implements OperationRunner {
     try {
       const prepared = await this.backend.prepare(this.request, this.abortController.signal);
       this.prepared = prepared;
-      this.totalBytes = checkedSize(prepared.totalBytes);
-      this.phase = "streaming";
-      this.publishProgress();
-      if (this.stopping) throw new Error("传输已停止");
-
-      const meter = new Transform({
-        transform: (chunk: Buffer | string, _encoding, callback) => {
-          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          if (!Number.isSafeInteger(this.transferredBytes + data.length)) {
-            callback(new Error("传输字节数溢出")); return;
-          }
-          this.transferredBytes += data.length;
+      const outcome = await runPreparedTransfer(prepared, {
+        isStopping: () => this.stopping,
+        onProgress: (transferredBytes, totalBytes) => {
+          this.transferredBytes = transferredBytes;
+          this.totalBytes = totalBytes;
           this.publishProgress();
-          callback(undefined, data);
+        },
+        onPhase: (phase) => {
+          this.phase = phase;
+          if (phase === "commit_started") this.finalTargetCommit = "unknown";
+          if (phase === "committed") this.finalTargetCommit = "committed";
+          this.publishProgress();
         }
       });
-      await pipeline(prepared.source, meter, prepared.target);
-      if (this.stopping) throw new Error("传输已停止");
-      if (this.transferredBytes !== this.totalBytes) throw new Error("源大小与实际流字节不一致");
-      this.phase = "sealing";
-      this.publishProgress();
-      await prepared.seal();
-      // 这是最终提交的同步闸门：事件循环不能在检查与 phase 写入之间插入取消。
-      if (this.stopping) throw new Error("传输已停止");
-      this.phase = "commit_started";
-      // commit 调用一旦开始，就不能再从客户端异常推断最终目标一定未提交。
-      this.finalTargetCommit = "unknown";
-      this.publishProgress();
-      this.cleanupState = await prepared.commit() ?? "not_needed";
-      this.finalTargetCommit = "committed";
-      this.phase = "committed";
-      this.publishProgress();
+      this.cleanupState = outcome.temporaryCleanup;
       await this.finishCommitted();
     } catch (error: unknown) {
       await this.finishFailure(error);

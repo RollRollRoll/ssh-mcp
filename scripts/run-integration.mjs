@@ -7,13 +7,15 @@ const files = {
     session: "tests/integration/linux/session.test.ts",
     command: "tests/integration/linux/command.test.ts",
     connection: "tests/integration/linux/connection.test.ts",
-    "file-transfer": "tests/integration/linux/file-transfer.test.ts"
+    "file-transfer": "tests/integration/linux/file-transfer.test.ts",
+    "directory-transfer": "tests/integration/linux/directory-transfer.test.ts"
   },
   windows: {
     session: "tests/integration/windows/session.test.ts",
     command: "tests/integration/windows/command.test.ts",
     "path-guard": "tests/integration/windows/path-guard.test.ts",
-    "file-transfer": "tests/integration/windows/file-transfer.test.ts"
+    "file-transfer": "tests/integration/windows/file-transfer.test.ts",
+    "directory-transfer": "tests/integration/windows/directory-transfer.test.ts"
   }
 };
 

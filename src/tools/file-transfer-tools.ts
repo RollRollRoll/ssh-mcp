@@ -10,7 +10,7 @@ import { OperationManagerError } from "../operations/operation-manager.js";
 
 const CommonFields = {
   hosts: z.array(z.string().min(1)).length(1).refine((hosts) => new Set(hosts).size === hosts.length, "主机别名不可重复"),
-  recursive: z.literal(false),
+  recursive: z.boolean(),
   overwrite: z.boolean(),
   executionMode: z.enum(["parallel", "sequential"])
 };
@@ -47,13 +47,13 @@ export interface FileTransferToolDependencies {
 
 export function registerFileTransferTools(server: McpServer, dependencies: FileTransferToolDependencies): void {
   server.registerTool("file_upload", {
-    description: "经一次性审批后把一个本地普通文件流式上传到一台登记主机",
+    description: "经一次性审批后把本地普通文件或目录上传到一台登记主机",
     inputSchema: UploadInputSchema,
     outputSchema: OutputSchema
   }, async (input) => await executeTransfer(dependencies, "upload", input));
 
   server.registerTool("file_download", {
-    description: "经一次性审批后从一台登记主机流式下载一个普通文件",
+    description: "经一次性审批后从一台登记主机下载普通文件或目录",
     inputSchema: DownloadInputSchema,
     outputSchema: OutputSchema
   }, async (input) => await executeTransfer(dependencies, "download", input));
@@ -79,8 +79,8 @@ async function executeTransfer(
   }
 
   const payload: Readonly<Record<string, string | boolean>> = direction === "upload"
-    ? { localSource: localPath, remoteTarget: remotePath, recursive: false, overwrite: input.overwrite }
-    : { remoteSource: remotePath, localTarget: localPath, recursive: false, overwrite: input.overwrite };
+    ? { localSource: localPath, remoteTarget: remotePath, recursive: input.recursive, overwrite: input.overwrite }
+    : { remoteSource: remotePath, localTarget: localPath, recursive: input.recursive, overwrite: input.overwrite };
   const expected = createOperationIntent({
     kind: direction, hosts: input.hosts, platformByHost: { [host.alias]: host.platform }, payload,
     executionMode: input.executionMode
@@ -114,7 +114,7 @@ function requestFromApprovedIntent(
   const alias = approved.hosts[0]!;
   const approvedHost = dependencies.registry.get(alias);
   if (approvedHost === undefined || approved.platformByHost[alias] !== approvedHost.platform
-    || Object.keys(approved.platformByHost).length !== 1 || approved.payload.recursive !== false
+    || Object.keys(approved.platformByHost).length !== 1 || typeof approved.payload.recursive !== "boolean"
     || typeof approved.payload.overwrite !== "boolean") {
     throw new IntentMismatchError();
   }
@@ -134,7 +134,8 @@ function requestFromApprovedIntent(
     host: approvedHost,
     source,
     target,
-    overwrite: approved.payload.overwrite
+    overwrite: approved.payload.overwrite,
+    recursive: approved.payload.recursive
   };
 }
 

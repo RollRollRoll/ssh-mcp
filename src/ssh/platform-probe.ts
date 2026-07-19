@@ -14,6 +14,7 @@ const WINDOWS_SCRIPT = [
 
 export interface ProbeChannel {
   readonly stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
+  destroy?(): unknown;
   on(event: "data", listener: (chunk: Buffer | string) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
   on(event: "close", listener: (code: number | undefined, signal: string | undefined) => void): this;
@@ -43,30 +44,36 @@ export async function runPlatformProbe(client: ProbeClient, host: HostConfig): P
 function executeProbe(client: ProbeClient, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let channel: ProbeChannel | undefined;
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     const fail = (): void => {
       if (!settled) {
         settled = true;
+        try { channel?.destroy?.(); } catch { /* 探针已失败，销毁异常不得二次结算。 */ }
         reject(new PlatformProbeError());
       }
     };
     const append = (target: "stdout" | "stderr", chunk: Buffer | string): void => {
       if (settled) return;
-      const next = Buffer.concat([target === "stdout" ? stdout : stderr, Buffer.from(chunk)]);
-      if (next.length + (target === "stdout" ? stderr.length : stdout.length) > MAX_PROBE_OUTPUT_BYTES) {
+      const current = target === "stdout" ? stdout : stderr;
+      const other = target === "stdout" ? stderr : stdout;
+      const chunkBytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk, "utf8");
+      if (chunkBytes > MAX_PROBE_OUTPUT_BYTES - current.length - other.length) {
         fail();
         return;
       }
+      const next = Buffer.concat([current, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)], current.length + chunkBytes);
       if (target === "stdout") stdout = next;
       else stderr = next;
     };
     try {
-      client.exec(command, (error, channel) => {
+      client.exec(command, (error, rawChannel) => {
         if (error !== undefined) {
           fail();
           return;
         }
+        channel = rawChannel;
         channel.on("data", (chunk) => append("stdout", chunk));
         channel.stderr.on("data", (chunk) => append("stderr", chunk));
         channel.on("error", fail);

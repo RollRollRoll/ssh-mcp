@@ -19,6 +19,8 @@ import { registerSessionTools, type SessionToolDependencies } from "./tools/sess
 import { registerFileTransferTools, type FileTransferToolDependencies } from "./tools/file-transfer-tools.js";
 import { TransferService } from "./transfers/file-transfer.js";
 import { SftpTransferBackend } from "./transfers/sftp-transfer-backend.js";
+import { DirectoryTransferService } from "./transfers/directory-transfer.js";
+import { SftpDirectoryTransferBackend } from "./transfers/directory-transfer-backend.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -94,10 +96,12 @@ export async function startServer(configPath = resolveConfigPath()): Promise<voi
   });
   registerProfileRunTool(server, { registry, runner, policy: new PolicyEngine(config.lowRiskProfiles) });
   registerSessionTools(server, { registry, approval, sessions, adapter });
+  const singleFileTransfer = new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots));
+  const directoryTransfer = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend(adapter, config.localRoots));
   registerFileTransferTools(server, {
     registry,
     approval,
-    transfer: new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots)),
+    transfer: { start: (request) => request.recursive ? directoryTransfer.start(request) : singleFileTransfer.start(request) },
     localRoots: config.localRoots,
     localPlatform: process.platform === "win32" ? "win32" : "posix"
   });

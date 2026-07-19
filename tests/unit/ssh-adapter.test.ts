@@ -10,6 +10,8 @@ import { TrustStore } from "../../src/ssh/trust-store.js";
 
 class FakeChannel extends EventEmitter {
   public readonly stderr = new EventEmitter();
+  public destroyCalls = 0;
+  public destroy(): this { this.destroyCalls += 1; return this; }
 }
 
 class FakeClient extends EventEmitter implements SshClientLike {
@@ -85,8 +87,9 @@ describe("platform probe", () => {
 
   it("退出码、marker 或总输出超过 4KiB 时返回 PLATFORM_MISMATCH", async () => {
     const client = new FakeClient();
+    let channel: FakeChannel | undefined;
     client.exec = ((_command: string, callback: (error: Error | undefined, channel: FakeChannel) => void) => {
-      const channel = new FakeChannel();
+      channel = new FakeChannel();
       callback(undefined, channel);
       setImmediate(() => {
         channel.emit("data", Buffer.alloc(4097));
@@ -96,6 +99,7 @@ describe("platform probe", () => {
     }) as FakeClient["exec"];
 
     await expect(runPlatformProbe(client, host())).rejects.toBeInstanceOf(PlatformProbeError);
+    expect(channel?.destroyCalls).toBe(1);
     await expect(runPlatformProbe(client, host())).rejects.toMatchObject({ code: ErrorCodes.PLATFORM_MISMATCH });
   });
 });

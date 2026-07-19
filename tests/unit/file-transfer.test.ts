@@ -1,9 +1,12 @@
 import { PassThrough, Readable } from "node:stream";
 import { join } from "node:path";
+import { lstat, mkdtemp, open, realpath, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { TransferService, type PreparedTransfer, type TransferBackend } from "../../src/transfers/file-transfer.js";
 import { OperationManager, OperationManagerError } from "../../src/operations/operation-manager.js";
 import type { HostConfig } from "../../src/config/schema.js";
+import { ErrorCodes } from "../../src/errors/error-codes.js";
 import { AtomicTarget, type AtomicTargetPort, type TemporaryWriter } from "../../src/transfers/atomic-target.js";
 import { SftpTransferBackend } from "../../src/transfers/sftp-transfer-backend.js";
 import type { SftpTransferSession, SshConnection } from "../../src/ssh/ssh-adapter.js";
@@ -408,7 +411,7 @@ describe("TransferService 单文件生命周期", () => {
     }
   });
 
-  it("prepare 创建远端 part 后源验证失败且清理被拒绝时返回 unknown/possible", async () => {
+  it("recursive=false 的本地目录源在创建远端 part 前拒绝", async () => {
     const opened: string[] = [];
     let cleanupAttempts = 0;
     let sftpCloses = 0;
@@ -444,15 +447,229 @@ describe("TransferService 单文件生命周期", () => {
       direction: "upload", host, source: join(process.cwd(), ".execute-task"), target: "/safe/target", overwrite: false
     });
     await terminal(manager, started.operationId);
-    expect(opened).toEqual(["/safe/.ssh-mcp-fixed.part"]);
-    expect(cleanupAttempts).toBe(1);
+    expect(opened).toEqual([]);
+    expect(cleanupAttempts).toBe(0);
     expect(sftpCloses).toBe(1);
     expect(connectionCloses).toBe(1);
     expect(manager.get(started.operationId)).toMatchObject({
-      state: "unknown",
-      error: { code: "STATE_UNKNOWN", sideEffects: "possible", details: { temporaryCleanup: "failed" } },
-      result: { completedItems: 0, finalTargetCommit: "not_committed", temporaryCleanup: "failed" }
+      state: "failed",
+      error: { code: "PATH_DENIED", sideEffects: "none" },
+      result: { completedItems: 0, finalTargetCommit: "not_committed", temporaryCleanup: "not_needed" }
     });
+  });
+
+  it("目录枚举身份必须在实际打开后的本地 fstat 再比较，普通文件换身时拒绝且不创建远端目标", async () => {
+    const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-identity-"));
+    const source = join(localRoot, "source.bin");
+    await writeFile(source, "changed");
+    const opened: string[] = [];
+    const notFound = (): Error => Object.assign(new Error("missing"), { code: "ENOENT" });
+    const sftp: SftpTransferSession = {
+      lstat: async (target) => {
+        if (target === "/") return { kind: "directory", id: "root", size: 0 };
+        if (target === "/safe") return { kind: "directory", id: "safe", size: 0 };
+        throw notFound();
+      },
+      realpath: async (target) => target,
+      createReadStream: () => { throw new Error("不应读取远端"); },
+      createWriteStream: (target) => { opened.push(target); return new PassThrough(); },
+      supportsAtomicReplace: true, supportsHardlink: true,
+      atomicReplace: async () => undefined, hardlink: async () => undefined,
+      unlink: async () => undefined, close: () => undefined
+    };
+    const connection: SshConnection = {
+      exec: () => undefined, openShell: () => undefined,
+      openSftp: (callback) => callback(undefined, sftp), close: () => undefined
+    };
+    const backend = new SftpTransferBackend({ connect: async () => connection }, [localRoot], { localPlatform: "posix" });
+    let caught: unknown;
+    try {
+      const prepared = await backend.prepare({
+        direction: "upload", host, source, target: "/safe/target.bin", overwrite: false, recursive: false,
+        expectedSourceIdentity: { kind: "file", id: "different-enumerated-id", size: 7 }
+      }, new AbortController().signal);
+      await prepared.close();
+    } catch (error: unknown) { caught = error; }
+    expect(caught).toMatchObject({ code: ErrorCodes.PATH_DENIED });
+    expect(opened).toEqual([]);
+  });
+
+  it("目录上传在真实本地 fd 打开前后复核挂载证据，后置失败时不创建远端目标并关闭 fd", async () => {
+    const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-mount-open-"));
+    const source = join(localRoot, "source.bin");
+    await writeFile(source, "safe");
+    const sourceStatus = await lstat(source);
+    const opened: string[] = [];
+    let mountChecks = 0;
+    const sftp: SftpTransferSession = {
+      lstat: async (target) => {
+        if (target === "/") return { kind: "directory", id: "root", size: 0 };
+        if (target === "/safe") return { kind: "directory", id: "safe", size: 0 };
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      },
+      realpath: async (target) => target,
+      createReadStream: () => { throw new Error("不应读取远端"); },
+      createWriteStream: (target) => { opened.push(target); return new PassThrough(); },
+      supportsAtomicReplace: true, supportsHardlink: true,
+      atomicReplace: async () => undefined, hardlink: async () => undefined,
+      unlink: async () => undefined, close: () => undefined
+    };
+    const connection: SshConnection = {
+      exec: () => undefined, openShell: () => undefined,
+      openSftp: (callback) => callback(undefined, sftp), close: () => undefined
+    };
+    const backend = new SftpTransferBackend({ connect: async () => connection }, [localRoot], { localPlatform: "posix" });
+    await expect(backend.prepare({
+      direction: "upload", host, source, target: "/safe/target.bin", overwrite: false, recursive: false,
+      expectedSourceIdentity: { kind: "file", id: `${sourceStatus.dev.toString(16)}:${sourceStatus.ino.toString(16)}`, size: 4 },
+      sourceMountVerifier: async () => {
+        mountChecks += 1;
+        if (mountChecks === 2) throw Object.assign(new Error("bind mount appeared"), { code: ErrorCodes.PATH_DENIED });
+      }
+    }, new AbortController().signal)).rejects.toMatchObject({ code: ErrorCodes.PATH_DENIED });
+    expect(mountChecks).toBe(2);
+    expect(opened).toEqual([]);
+    await expect(open(source, "r").then(async (handle) => { await handle.close(); })).resolves.toBeUndefined();
+  });
+
+  it("远端源在枚举复核与实际句柄 fstat 间换身时拒绝且不创建本地目标", async () => {
+    const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-remote-identity-"));
+    const target = join(localRoot, "target.bin");
+    let openedHandles = 0;
+    let closedHandles = 0;
+    const sftp: SftpTransferSession = {
+      lstat: async (value) => {
+        if (value === "/") return { kind: "directory", id: "root", size: 0 };
+        if (value === "/safe") return { kind: "directory", id: "safe", size: 0 };
+        if (value === "/safe/source.bin") return { kind: "file", id: "enumerated", size: 4 };
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      },
+      realpath: async (value) => value,
+      createReadStream: () => { throw new Error("必须使用句柄打开接口"); },
+      openReadFile: async () => {
+        openedHandles += 1;
+        return {
+          stream: Readable.from([Buffer.from("evil")]), stat: { kind: "file", id: "replacement", size: 4 },
+          close: async () => { closedHandles += 1; }
+        };
+      },
+      createWriteStream: () => { throw new Error("不应创建远端目标"); },
+      supportsAtomicReplace: true, supportsHardlink: true,
+      atomicReplace: async () => undefined, hardlink: async () => undefined,
+      unlink: async () => undefined, close: () => undefined
+    };
+    const connection: SshConnection = {
+      exec: () => undefined, openShell: () => undefined,
+      openSftp: (callback) => callback(undefined, sftp), close: () => undefined
+    };
+    const backend = new SftpTransferBackend({ connect: async () => connection }, [localRoot], { localPlatform: "posix" });
+    await expect(backend.prepare({
+      direction: "download", host, source: "/safe/source.bin", target, overwrite: false, recursive: false,
+      expectedSourceIdentity: { kind: "file", id: "enumerated", size: 4 }
+    }, new AbortController().signal)).rejects.toMatchObject({ code: ErrorCodes.PATH_DENIED });
+    expect(openedHandles).toBe(1);
+    expect(closedHandles).toBe(1);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("目录下载在真实远端 handle 打开前后复核挂载证据，后置失败时 close-once 且不创建本地目标", async () => {
+    const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-remote-mount-open-"));
+    const target = join(localRoot, "target.bin");
+    let mountChecks = 0;
+    let closes = 0;
+    const sftp: SftpTransferSession = {
+      lstat: async (value) => {
+        if (value === "/") return { kind: "directory", id: "root", size: 0 };
+        if (value === "/safe") return { kind: "directory", id: "safe", size: 0 };
+        if (value === "/safe/source.bin") return { kind: "file", id: "enumerated", size: 4 };
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      },
+      realpath: async (value) => value,
+      createReadStream: () => { throw new Error("必须使用句柄打开接口"); },
+      openReadFile: async () => ({
+        stream: Readable.from([Buffer.from("safe")]), stat: { kind: "file", id: "enumerated", size: 4 },
+        close: async () => { closes += 1; }
+      }),
+      createWriteStream: () => { throw new Error("不应创建远端目标"); },
+      supportsAtomicReplace: true, supportsHardlink: true,
+      atomicReplace: async () => undefined, hardlink: async () => undefined,
+      unlink: async () => undefined, close: () => undefined
+    };
+    const connection: SshConnection = {
+      exec: () => undefined, openShell: () => undefined,
+      openSftp: (callback) => callback(undefined, sftp), close: () => undefined
+    };
+    const backend = new SftpTransferBackend({ connect: async () => connection }, [localRoot], { localPlatform: "posix" });
+    await expect(backend.prepare({
+      direction: "download", host, source: "/safe/source.bin", target, overwrite: false, recursive: false,
+      expectedSourceIdentity: { kind: "file", id: "enumerated", size: 4 },
+      sourceMountVerifier: async () => {
+        mountChecks += 1;
+        if (mountChecks === 2) throw Object.assign(new Error("bind mount appeared"), { code: ErrorCodes.PATH_DENIED });
+      }
+    }, new AbortController().signal)).rejects.toMatchObject({ code: ErrorCodes.PATH_DENIED });
+    expect(mountChecks).toBe(2);
+    expect(closes).toBe(1);
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("远端 opened file 在非法 stat、目标验证失败时都等待 close-once，关闭失败按未知证据收敛", async () => {
+    for (const scenario of ["invalid_stat", "target_guard", "close_failure"] as const) {
+      const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-opened-close-"));
+      const target = scenario === "target_guard" ? join(localRoot, "missing", "target.bin") : join(localRoot, "target.bin");
+      const source = new PassThrough();
+      let closes = 0;
+      const unhandled: unknown[] = [];
+      const listener = (error: unknown): void => { unhandled.push(error); };
+      process.on("unhandledRejection", listener);
+      try {
+        const sftp: SftpTransferSession = {
+          lstat: async (value) => {
+            if (value === "/") return { kind: "directory", id: "root", size: 0 };
+            if (value === "/safe") return { kind: "directory", id: "safe", size: 0 };
+            if (value === "/safe/source.bin") return { kind: "file", id: "enumerated", size: 4 };
+            throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          },
+          realpath: async (value) => value,
+          createReadStream: () => { throw new Error("必须使用 opened file"); },
+          openReadFile: async () => ({
+            stream: source,
+            stat: scenario === "invalid_stat"
+              ? { kind: "file", id: "enumerated", size: -1 }
+              : scenario === "close_failure"
+                ? { kind: "file", id: "replacement", size: 4 }
+              : { kind: "file", id: "enumerated", size: 4 },
+            close: async () => { closes += 1; if (scenario === "close_failure") throw new Error("close failed"); }
+          }),
+          createWriteStream: () => { throw new Error("不应创建远端目标"); },
+          supportsAtomicReplace: true, supportsHardlink: true,
+          atomicReplace: async () => undefined, hardlink: async () => undefined,
+          unlink: async () => undefined, close: () => undefined
+        };
+        const connection: SshConnection = {
+          exec: () => undefined, openShell: () => undefined,
+          openSftp: (callback) => callback(undefined, sftp), close: () => undefined
+        };
+        const backend = new SftpTransferBackend({ connect: async () => connection }, [localRoot], { localPlatform: "posix" });
+        const manager = new OperationManager({ idFactory: () => `opened-${scenario}` });
+        const service = new TransferService(manager, backend);
+        const started = service.start({
+          direction: "download", host, source: "/safe/source.bin", target, overwrite: false, recursive: false,
+          expectedSourceIdentity: { kind: "file", id: "enumerated", size: 4 }
+        });
+        await terminal(manager, started.operationId);
+        expect(closes).toBe(1);
+        expect(manager.get(started.operationId)).toMatchObject(scenario === "close_failure"
+          ? { state: "unknown", error: { code: ErrorCodes.STATE_UNKNOWN } }
+          : scenario === "invalid_stat"
+            ? { state: "failed", error: { code: ErrorCodes.PATH_DENIED } }
+            : { state: "failed" });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.removeListener("unhandledRejection", listener);
+      }
+    }
   });
 });
 

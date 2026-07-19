@@ -63,11 +63,31 @@ export interface SftpTransferStat {
   readonly size: number;
 }
 
+export interface SftpOpenedReadFile {
+  readonly stream: Readable;
+  readonly stat: SftpTransferStat;
+  /** 销毁流并等待底层 SFTP handle 完成一次 CLOSE。 */
+  close(): Promise<void>;
+}
+
+export class SftpOpenedReadFileError extends Error {
+  public readonly code = ErrorCodes.PATH_DENIED;
+
+  public constructor(public readonly resourceCloseFailed: boolean, options?: ErrorOptions) {
+    super("SFTP 已打开文件复核失败", options);
+    this.name = "SftpOpenedReadFileError";
+  }
+}
+
 export interface SftpTransferSession {
   lstat(path: string): Promise<SftpTransferStat>;
   realpath(path: string): Promise<string>;
   createReadStream(path: string): Readable;
+  /** 以句柄打开后执行 fstat，供枚举身份连续性校验。 */
+  openReadFile?(path: string): Promise<SftpOpenedReadFile>;
   createWriteStream(path: string): Writable;
+  readdir?(path: string): Promise<readonly string[]>;
+  mkdir?(path: string): Promise<void>;
   readonly supportsAtomicReplace: boolean;
   readonly supportsHardlink: boolean;
   atomicReplace(path: string, target: string): Promise<void>;
@@ -304,7 +324,37 @@ function adaptSftp(sftp: SFTPWrapper): SftpTransferSession {
     lstat: async (target) => await callbackValue<Stats>((callback) => sftp.lstat(target, callback)).then(toTransferStat),
     realpath: async (target) => await callbackValue<string>((callback) => sftp.realpath(target, callback)),
     createReadStream: (target) => sftp.createReadStream(target, { flags: "r", autoClose: true }),
+    openReadFile: async (target) => {
+      const handle = await callbackValue<Buffer>((callback) => sftp.open(target, "r", callback));
+      let stream: ClosableReadStream | undefined;
+      let closePromise: Promise<void> | undefined;
+      const close = async (): Promise<void> => {
+        closePromise ??= stream === undefined
+          ? callbackVoid((callback) => sftp.close(handle, callback))
+          : closeReadStream(stream);
+        await closePromise;
+      };
+      try {
+        const openedStat = await callbackValue<Stats>((callback) => sftp.fstat(handle, callback));
+        const stat = toTransferStat(openedStat);
+        stream = sftp.createReadStream(target, { flags: "r", handle, autoClose: false }) as ClosableReadStream;
+        return {
+          stream,
+          stat,
+          close
+        };
+      } catch (error: unknown) {
+        try { await close(); }
+        catch (closeError: unknown) {
+          throw new SftpOpenedReadFileError(true, { cause: new AggregateError([error, closeError]) });
+        }
+        throw new SftpOpenedReadFileError(false, { cause: error });
+      }
+    },
     createWriteStream: (target) => sftp.createWriteStream(target, { flags: "wx", autoClose: true }),
+    readdir: async (target) => await callbackValue<readonly { filename: string }[]>((callback) => sftp.readdir(target, callback as never))
+      .then((entries) => entries.map((entry) => entry.filename)),
+    mkdir: async (target) => await callbackVoid((callback) => sftp.mkdir(target, callback)),
     supportsAtomicReplace: extensions["posix-rename@openssh.com"] === "1",
     supportsHardlink: extensions["hardlink@openssh.com"] === "1",
     atomicReplace: async (source, target) => await callbackVoid((callback) => sftp.ext_openssh_rename(source, target, callback)),
@@ -313,6 +363,20 @@ function adaptSftp(sftp: SFTPWrapper): SftpTransferSession {
     close: () => { sftp.end(); }
   };
 }
+
+interface ClosableReadStream extends Readable {
+  close(callback: (error?: Error | null) => void): void;
+}
+
+async function closeReadStream(stream: ClosableReadStream): Promise<void> {
+  // ssh2 ReadStream.close() 内部完成且仅完成一次 handle CLOSE；destroy 后重复调用也只等待既有销毁边界。
+  stream.on("error", ignoreLateStreamError);
+  await new Promise<void>((resolve, reject) => {
+    stream.close((error) => error == null ? resolve() : reject(error));
+  });
+}
+
+function ignoreLateStreamError(): void { /* 句柄关闭后的迟到错误不再改变既有关闭证据。 */ }
 
 function toTransferStat(status: Stats): SftpTransferStat {
   const kind = status.isSymbolicLink() ? "symlink" : status.isFile() ? "file" : status.isDirectory() ? "directory" : undefined;

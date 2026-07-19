@@ -215,7 +215,7 @@
   - 中断后重新调用从头执行，不使用偏移续传，也不宣称保留权限、所有者或时间。
 - 验证方式：`npm test -- tests/unit/directory-transfer.test.ts && npm run test:integration:linux -- directory-transfer`；Windows 环境执行对应脚本。
 - 覆盖：设计 9.6；规格 Requirement「文件与目录传输」的递归、链接、部分失败和进度场景；MUST NOT 9、10。
-- [ ] 完成
+- [x] 完成
 
 ### Task 12：交付命令、Profile 与传输的多主机协作
 

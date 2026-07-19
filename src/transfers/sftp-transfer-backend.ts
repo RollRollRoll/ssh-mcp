@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import path from "node:path";
 import { link, lstat, open, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
@@ -13,10 +14,17 @@ import {
 import { LocalPathGuard } from "../paths/local-path-guard.js";
 import { LinuxPathGuard, type RemoteSafePathHandle } from "../paths/linux-path-guard.js";
 import { WindowsPathGuard } from "../paths/windows-path-guard.js";
-import { WindowsReparseProbe } from "../paths/windows-reparse-probe.js";
+import { MAX_WINDOWS_REPARSE_PROBE_STDOUT_BYTES, WindowsReparseProbe } from "../paths/windows-reparse-probe.js";
+import { executeBoundedProbe } from "../ssh/bounded-probe.js";
 import { PathGuardError, type PathPlatform } from "../paths/path-guard.js";
 import { ErrorCodes } from "../errors/error-codes.js";
-import type { SftpTransferSession, SshAdapter, SshConnection } from "../ssh/ssh-adapter.js";
+import {
+  SftpOpenedReadFileError,
+  type SftpTransferSession,
+  type SftpTransferStat,
+  type SshAdapter,
+  type SshConnection
+} from "../ssh/ssh-adapter.js";
 
 export interface SftpTransferBackendOptions {
   readonly localPlatform?: PathPlatform;
@@ -46,12 +54,16 @@ export class SftpTransferBackend implements TransferBackend {
       sftp = await openSftp(connection);
       resources.add(() => sftp!.close());
       throwIfAborted(signal);
+      const sourceMountVerifier = createActualConnectionMountVerifier(request, connection);
       return request.direction === "upload"
-        ? await this.prepareUpload(request, connection, sftp, signal, resources)
-        : await this.prepareDownload(request, connection, sftp, signal, resources);
+        ? await this.prepareUpload(request, connection, sftp, signal, resources, sourceMountVerifier)
+        : await this.prepareDownload(request, connection, sftp, signal, resources, sourceMountVerifier);
     } catch (error: unknown) {
       let resourceCloseFailed = false;
       try { await resources.closeAll(); } catch { resourceCloseFailed = true; }
+      if (error instanceof SftpOpenedReadFileError) {
+        throw new TransferPreparationError(error, "not_needed", resourceCloseFailed || error.resourceCloseFailed);
+      }
       if (error instanceof TransferPreparationError) {
         throw new TransferPreparationError(error.originalError, error.temporaryCleanup, resourceCloseFailed || error.resourceCloseFailed);
       }
@@ -65,8 +77,24 @@ export class SftpTransferBackend implements TransferBackend {
     connection: SshConnection,
     sftp: SftpTransferSession,
     signal: AbortSignal,
-    resources: ResourceClosers
+    resources: ResourceClosers,
+    sourceMountVerifier: ((source: string) => Promise<void>) | undefined
   ): Promise<PreparedTransfer> {
+    // 先证明源是普通文件，再创建任何远端临时目标；recursive=false 遇到目录必须零目标副作用拒绝。
+    const local = await new LocalPathGuard(this.localRoots, { platform: this.localPlatform }).verify(request.source);
+    throwIfAborted(signal);
+    await sourceMountVerifier?.(request.source);
+    const file = await local.openReadOnly();
+    resources.add(async () => await file.close());
+    const status = await file.stat();
+    await sourceMountVerifier?.(request.source);
+    if (!status.isFile() || !Number.isSafeInteger(status.size) || status.size! < 0 || file.createReadStream === undefined) {
+      throw new PathGuardError();
+    }
+    if (request.expectedSourceIdentity !== undefined) {
+      const identity = localOpenedIdentity(status);
+      if (!sameSourceIdentity(request.expectedSourceIdentity, identity)) throw new PathGuardError();
+    }
     const remote = await this.remoteGuard(request, connection, sftp, request.target);
     throwIfAborted(signal);
     const atomic = new AtomicTarget(remote.canonical, request.overwrite, request.host.platform === "linux" ? "posix" : "win32",
@@ -75,14 +103,6 @@ export class SftpTransferBackend implements TransferBackend {
     try {
       target = await atomic.open();
       throwIfAborted(signal);
-      const local = await new LocalPathGuard(this.localRoots, { platform: this.localPlatform }).verify(request.source);
-      throwIfAborted(signal);
-      const file = await local.openReadOnly();
-      resources.add(async () => await file.close());
-      const status = await file.stat();
-      if (!status.isFile() || !Number.isSafeInteger(status.size) || status.size! < 0 || file.createReadStream === undefined) {
-        throw new PathGuardError();
-      }
       const source = file.createReadStream({ autoClose: false });
       throwIfAborted(signal);
       return prepared(source, target, status.size!, atomic, resources);
@@ -100,14 +120,33 @@ export class SftpTransferBackend implements TransferBackend {
     connection: SshConnection,
     sftp: SftpTransferSession,
     signal: AbortSignal,
-    resources: ResourceClosers
+    resources: ResourceClosers,
+    sourceMountVerifier: ((source: string) => Promise<void>) | undefined
   ): Promise<PreparedTransfer> {
     const remote = await this.remoteGuard(request, connection, sftp, request.source);
     throwIfAborted(signal);
     await remote.revalidateBeforeOpen();
-    const sourceStatus = await sftp.lstat(remote.canonical);
-    if (sourceStatus.kind !== "file" || !Number.isSafeInteger(sourceStatus.size) || sourceStatus.size < 0) throw new PathGuardError();
-    const source = sftp.createReadStream(remote.canonical);
+    let sourceStatus: SftpTransferStat;
+    let source: Readable;
+    if (request.expectedSourceIdentity !== undefined) {
+      if (sftp.openReadFile === undefined) throw new PathGuardError();
+      await sourceMountVerifier?.(request.source);
+      const opened = await sftp.openReadFile(remote.canonical);
+      resources.add(async () => await opened.close());
+      sourceStatus = opened.stat;
+      source = opened.stream;
+      await sourceMountVerifier?.(request.source);
+      if (!sameSourceIdentity(request.expectedSourceIdentity, sourceStatus)) {
+        throw new PathGuardError();
+      }
+    } else {
+      sourceStatus = await sftp.lstat(remote.canonical);
+      source = sftp.createReadStream(remote.canonical);
+    }
+    if (sourceStatus.kind !== "file" || !Number.isSafeInteger(sourceStatus.size) || sourceStatus.size < 0) {
+      source.destroy();
+      throw new PathGuardError();
+    }
 
     const local = await new LocalPathGuard(this.localRoots, { platform: this.localPlatform }).verify(request.target);
     throwIfAborted(signal);
@@ -130,9 +169,72 @@ export class SftpTransferBackend implements TransferBackend {
 
   private async remoteGuard(request: TransferRequest, connection: SshConnection, sftp: SftpTransferSession, target: string): Promise<RemoteSafePathHandle> {
     if (request.host.platform === "linux") return await new LinuxPathGuard(request.host.remoteRoots, sftp).verify(target);
-    const probe = new WindowsReparseProbe({ execute: async (command) => await executeProbe(connection, command) }, request.host.shell.command);
+    const probe = new WindowsReparseProbe({
+      execute: async (command) => await executeBoundedProbe(connection, command, MAX_WINDOWS_REPARSE_PROBE_STDOUT_BYTES)
+    }, request.host.shell.command);
     return await new WindowsPathGuard(request.host.remoteRoots, sftp, probe).verify(target);
   }
+}
+
+/**
+ * 递归远端下载不得复用目录枚举连接的 mount namespace。这里仅根据内部批准元数据，
+ * 在即将持有真实 SFTP handle 的连接上执行固定 mountinfo 探针。
+ */
+function createActualConnectionMountVerifier(
+  request: TransferRequest,
+  connection: SshConnection
+): ((source: string) => Promise<void>) | undefined {
+  const proof = request.sourceMountProof;
+  if (proof === undefined || request.direction !== "download" || proof.platform !== "posix") {
+    return request.sourceMountVerifier;
+  }
+  const root = canonicalPosix(proof.sourceRoot);
+  return async (candidate: string): Promise<void> => {
+    const target = canonicalPosix(candidate);
+    if (!isPathWithin(target, root)) throw new PathGuardError();
+    const mountPoints = await loadRemoteLinuxMountPoints(connection);
+    for (const mountPoint of mountPoints) {
+      // 根文件系统不是源树内新增边界；其余覆盖当前访问路径的源树挂载一律拒绝。
+      if (mountPoint !== "/" && isPathWithin(mountPoint, root) && isPathWithin(target, mountPoint)) {
+        throw new PathGuardError();
+      }
+    }
+  };
+}
+
+const MAX_MOUNT_INFO_BYTES = 1024 * 1024;
+
+async function loadRemoteLinuxMountPoints(connection: SshConnection): Promise<ReadonlySet<string>> {
+  const result = await executeBoundedProbe(connection, "cat -- /proc/self/mountinfo", MAX_MOUNT_INFO_BYTES);
+  if (result.code !== 0 || result.stderr.length > 0) throw new PathGuardError();
+  return parseLinuxMountInfo(result.stdout);
+}
+
+function parseLinuxMountInfo(content: string): ReadonlySet<string> {
+  if (Buffer.byteLength(content, "utf8") > MAX_MOUNT_INFO_BYTES || content.length === 0) throw new PathGuardError();
+  const result = new Set<string>();
+  for (const line of content.trimEnd().split("\n")) {
+    const fields = line.split(" ");
+    const separator = fields.indexOf("-");
+    if (separator < 6 || fields[4] === undefined) throw new PathGuardError();
+    result.add(canonicalPosix(decodeMountPath(fields[4])));
+  }
+  if (result.size === 0) throw new PathGuardError();
+  return result;
+}
+
+function decodeMountPath(value: string): string {
+  if (/\\(?![0-7]{3})/.test(value)) throw new PathGuardError();
+  return value.replace(/\\([0-7]{3})/g, (_match, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)));
+}
+
+function canonicalPosix(value: string): string {
+  if (!value.startsWith("/") || value.includes("\0")) throw new PathGuardError();
+  return path.posix.normalize(value);
+}
+
+function isPathWithin(candidate: string, root: string): boolean {
+  return candidate === root || root === "/" || candidate.startsWith(`${root}/`);
 }
 
 function prepared(
@@ -282,25 +384,22 @@ async function openSftp(connection: SshConnection): Promise<SftpTransferSession>
   return await new Promise((resolve, reject) => connection.openSftp!((error, sftp) => error === undefined ? resolve(sftp) : reject(error)));
 }
 
-async function executeProbe(connection: SshConnection, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
-  return await new Promise((resolve, reject) => connection.exec(command, (error, rawChannel) => {
-    if (error !== undefined) { reject(error); return; }
-    const channel = rawChannel as unknown as {
-      stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): void };
-      on(event: "data", listener: (chunk: Buffer | string) => void): void;
-      on(event: "error", listener: (error: Error) => void): void;
-      on(event: "close", listener: (code: number | null | undefined) => void): void;
-    };
-    const stdout: Buffer[] = []; const stderr: Buffer[] = [];
-    channel.on("data", (chunk) => stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    channel.stderr.on("data", (chunk) => stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    channel.on("error", reject);
-    channel.on("close", (code) => resolve({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), code: code ?? -1 }));
-  }));
-}
-
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === 2 || error.code === "2");
+}
+
+function localOpenedIdentity(status: { isFile(): boolean; readonly dev?: number; readonly ino?: number; readonly size?: number }): SftpTransferStat {
+  if (!status.isFile() || !Number.isSafeInteger(status.dev) || status.dev! < 0
+    || !Number.isSafeInteger(status.ino) || status.ino! < 0
+    || !Number.isSafeInteger(status.size) || status.size! < 0) throw new PathGuardError();
+  return { kind: "file", size: status.size!, id: `${status.dev!.toString(16)}:${status.ino!.toString(16)}` };
+}
+
+function sameSourceIdentity(
+  expected: { readonly kind: "file"; readonly id: string; readonly size: number },
+  actual: Pick<SftpTransferStat, "kind" | "id" | "size">
+): boolean {
+  return actual.kind === expected.kind && actual.id === expected.id && actual.size === expected.size;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

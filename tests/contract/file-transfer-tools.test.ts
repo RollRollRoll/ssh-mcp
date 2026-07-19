@@ -26,7 +26,7 @@ describe("file_upload/file_download MCP 契约", () => {
     expect(names).not.toEqual(expect.arrayContaining(["file_copy", "directory_upload", "file_resume"]));
   });
 
-  it("未知主机、重复/多主机、越界路径、recursive=true 和额外连接字段在审批及操作前整体拒绝", async () => {
+  it("未知主机、重复/多主机、越界路径、非法 recursive 和额外连接字段在审批及操作前整体拒绝", async () => {
     let approvals = 0;
     let starts = 0;
     const { client } = await connect({ execute: async () => { approvals += 1; throw new Error("不应审批"); } }, () => { starts += 1; });
@@ -36,12 +36,34 @@ describe("file_upload/file_download MCP 契约", () => {
       { ...base, hosts: ["linux", "linux"] },
       { ...base, localSource: "/outside/source" },
       { ...base, remoteTarget: "/outside/target" },
-      { ...base, recursive: true },
+      { ...base, recursive: "yes" },
       { ...base, password: "secret" }
     ];
     for (const request of requests) await expect(client.callTool({ name: "file_upload", arguments: request })).resolves.toMatchObject({ isError: true });
     expect(approvals).toBe(0);
     expect(starts).toBe(0);
+  });
+
+  it("recursive=true 只绑定审批并在获批后重建目录请求，审批前不启动传输", async () => {
+    const intents: OperationIntent[] = [];
+    let starts = 0;
+    const { client } = await connect({
+      execute: async <T>(intent: OperationIntent, sideEffect: (intent: OperationIntent) => T | Promise<T>) => {
+        intents.push(intent);
+        expect(starts).toBe(0);
+        return { approved: true as const, intent, value: await sideEffect(intent) };
+      }
+    }, (actual) => {
+      starts += 1;
+      expect(actual).toMatchObject({ recursive: true });
+      return { operationId: "directory-1", state: "running" };
+    });
+    await expect(client.callTool({ name: "file_upload", arguments: {
+      hosts: ["linux"], localSource: "/local/tree", remoteTarget: "/remote/tree",
+      recursive: true, overwrite: true, executionMode: "sequential"
+    } })).resolves.toMatchObject({ structuredContent: { operationId: "directory-1", state: "running" } });
+    expect(intents[0]?.payload).toMatchObject({ recursive: true, overwrite: true });
+    expect(starts).toBe(1);
   });
 
   it("审批精确绑定方向、平台、有序主机、路径、覆盖、递归和执行模式，获批后立即返回 running", async () => {
@@ -86,7 +108,8 @@ describe("file_upload/file_download MCP 契约", () => {
       host,
       source: "/local/source.bin",
       target: "/remote/target.bin",
-      overwrite: true
+      overwrite: true,
+      recursive: false
     });
     expect((actualRequest as { host: HostConfig }).host).not.toBe(host);
   });
