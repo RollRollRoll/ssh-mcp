@@ -224,7 +224,7 @@ describe("CommandRunner", () => {
     expect(partialFailure).toMatchObject({
       state: "partial_failure", error: stableError(ErrorCodes.PARTIAL_FAILURE, "partial_failure", "partial"),
       result: {
-        aggregateTransferredBytes: 1, completedItems: 1, succeeded: ["a"],
+        aggregateTransferredBytes: 4, completedItems: 1, succeeded: ["a"],
         failed: [{ relativePath: "b", code: ErrorCodes.TRANSFER_FAILED, safety: "confirmed" }]
       }
     });

@@ -52,7 +52,7 @@ export class SftpTransferBackend implements TransferBackend {
   }
 
   public async prepare(request: TransferRequest, signal: AbortSignal): Promise<PreparedTransfer> {
-    const resources = new ResourceClosers();
+    const resources = new ResourceClosers(this.cleanupTimeoutMs);
     let connection: SshConnection | undefined;
     let sftp: SftpTransferSession | undefined;
     let abortable: AbortableSftpConnection | undefined;
@@ -365,16 +365,29 @@ function localWriter(handle: FileHandle): TemporaryWriter {
 
 class ResourceClosers {
   private readonly entries: Array<{ closed: boolean; close: () => void | Promise<void> }> = [];
+  public constructor(private readonly closeTimeoutMs: number) {}
   public add(close: () => void | Promise<void>): void { this.entries.push({ closed: false, close }); }
   public async closeAll(): Promise<void> {
     const errors: unknown[] = [];
     for (const entry of [...this.entries].reverse()) {
       if (entry.closed) continue;
       entry.closed = true;
-      try { await entry.close(); } catch (error: unknown) { errors.push(error); }
+      try { await closeWithinBudget(entry.close, this.closeTimeoutMs); } catch (error: unknown) { errors.push(error); }
     }
     if (errors.length > 0) throw new AggregateError(errors, "传输资源关闭失败");
   }
+}
+
+async function closeWithinBudget(close: () => void | Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const work = Promise.resolve().then(close);
+  // 超时后底层回调仍可能迟到拒绝；显式观察，不能形成 detached rejection。
+  void work.catch(() => undefined);
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("传输资源关闭超时")), timeoutMs);
+  });
+  try { await Promise.race([work, timeout]); }
+  finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 async function cleanupPreparationTarget(atomic: AtomicTarget): Promise<TemporaryCleanupState> {

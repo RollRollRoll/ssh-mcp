@@ -232,6 +232,9 @@ describe("DirectoryTransferService", () => {
 
   it("目录先于子项创建，普通文件严格串行并发布累计进度和稳定逐项结果", async () => {
     const calls: string[] = [];
+    const progress: Array<{
+      transferredBytes: number; aggregateTransferredBytes: number; completedItems: number; totalItems: number;
+    }> = [];
     const manager = new OperationManager({ idFactory: () => "directory-ok" });
     const service = new DirectoryTransferService(manager, backend(preparedDirectory(calls, [
       { relativePath: "a", kind: "directory", size: 0, id: "d" },
@@ -240,7 +243,7 @@ describe("DirectoryTransferService", () => {
     ], new Map([
       ["a/one.bin", transfer(Buffer.from([1, 2, 3]))],
       ["z.bin", transfer(Buffer.from([4, 5]))]
-    ]))));
+    ]))), (event) => progress.push(event));
     const started = service.start(request());
     await terminal(manager, started.operationId);
     expect(calls).toEqual(["root", "dir:a", "prepare:a/one.bin", "commit:a/one.bin", "prepare:z.bin", "commit:z.bin", "close"]);
@@ -252,6 +255,79 @@ describe("DirectoryTransferService", () => {
         succeeded: ["a/one.bin", "z.bin"], failed: [], notExecuted: []
       }
     });
+    expect(progress.length).toBeLessThanOrEqual(4);
+    expect(progress[0]).toMatchObject({ transferredBytes: 0, aggregateTransferredBytes: 0, completedItems: 0 });
+    expect(progress.some((event) => event.aggregateTransferredBytes === 3)).toBe(true);
+    expect(progress.at(-1)).toMatchObject({
+      transferredBytes: 2, aggregateTransferredBytes: 5, completedItems: 2, totalItems: 2
+    });
+    expect(progress.map((event) => event.aggregateTransferredBytes)).toEqual(
+      [...progress.map((event) => event.aggregateTransferredBytes)].sort((left, right) => left - right)
+    );
+  });
+
+  it("第二项部分失败时累计进度包含实际已传字节，并与聚合结果一致", async () => {
+    const progress: Array<{
+      transferredBytes: number; aggregateTransferredBytes: number; completedItems: number; totalItems: number;
+    }> = [];
+    const manager = new OperationManager({ idFactory: () => "directory-partial-progress" });
+    const service = new DirectoryTransferService(manager, backend(preparedDirectory([], [
+      { relativePath: "a.bin", kind: "file", size: 3, id: "a" },
+      { relativePath: "b.bin", kind: "file", size: 2, id: "b" }
+    ], new Map([
+      ["a.bin", transfer(Buffer.from([1, 2, 3]))],
+      ["b.bin", transfer(Buffer.from([4]), { totalBytes: 2 })]
+    ]))), (event) => progress.push(event));
+
+    const started = service.start(request());
+    await terminal(manager, started.operationId);
+
+    expect(manager.get(started.operationId)).toMatchObject({
+      state: "partial_failure",
+      result: {
+        aggregateTransferredBytes: 4,
+        completedItems: 1,
+        succeeded: ["a.bin"],
+        failed: [{ relativePath: "b.bin", code: ErrorCodes.TRANSFER_FAILED, safety: "confirmed" }]
+      }
+    });
+    expect(progress.length).toBeLessThanOrEqual(4);
+    expect(progress.at(-1)).toMatchObject({
+      transferredBytes: 1, aggregateTransferredBytes: 4, completedItems: 1, totalItems: 2
+    });
+    expect(progress.at(-1)?.aggregateTransferredBytes).toBe(
+      manager.get(started.operationId).result?.aggregateTransferredBytes
+    );
+  });
+
+  it("两个并行目录 Operation 各自保持固定事件预算和累计进度隔离", async () => {
+    const ids = ["directory-parallel-one", "directory-parallel-two"];
+    const progress: Array<{ operationId: string; aggregateTransferredBytes: number }> = [];
+    const manager = new OperationManager({ idFactory: () => ids.shift()! });
+    const service = new DirectoryTransferService(manager, {
+      prepare: async (value) => {
+        const sizes = value.source.endsWith("one") ? [3, 2] : [4, 2];
+        return preparedDirectory([], [
+          { relativePath: "a.bin", kind: "file", size: sizes[0]!, id: "a" },
+          { relativePath: "b.bin", kind: "file", size: sizes[1]!, id: "b" }
+        ], new Map([
+          ["a.bin", transfer(Buffer.alloc(sizes[0]!))],
+          ["b.bin", transfer(Buffer.alloc(sizes[1]!))]
+        ]));
+      }
+    }, (event) => progress.push(event));
+
+    const first = service.start({ ...request(), source: "/local/one" });
+    const second = service.start({ ...request(), source: "/local/two" });
+    await Promise.all([terminal(manager, first.operationId), terminal(manager, second.operationId)]);
+
+    for (const [operationId, expectedBytes] of [[first.operationId, 5], [second.operationId, 6]] as const) {
+      const own = progress.filter((event) => event.operationId === operationId);
+      expect(own.length).toBeLessThanOrEqual(4);
+      expect(own[0]).toMatchObject({ aggregateTransferredBytes: 0 });
+      expect(own.at(-1)).toMatchObject({ aggregateTransferredBytes: expectedBytes });
+      expect(manager.get(operationId).result?.aggregateTransferredBytes).toBe(expectedBytes);
+    }
   });
 
   it("目录单文件大量 1-byte chunk 的进度 observer 使用固定预算并保留终态", async () => {

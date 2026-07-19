@@ -59,6 +59,8 @@ export interface TransferBackend {
 export interface TransferProgressEvent {
   readonly operationId: string;
   readonly host: string;
+  /** 目录操作从首项开始累计的实际传输字节；单文件事件省略。 */
+  readonly aggregateTransferredBytes?: number;
   readonly transferredBytes: number;
   readonly totalBytes?: number;
   readonly completedItems: number;

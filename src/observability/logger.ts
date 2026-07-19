@@ -70,7 +70,7 @@ const safeTemporaryCleanupStates = new Set(["not_needed", "removed", "failed", "
 const safeFinalTargetCommitStates = new Set(["not_committed", "committed", "unknown"]);
 const safeCommitOutcomes = new Set(["unknown"]);
 const safeNumericDetails = new Set([
-  "droppedBytes", "minCursor", "transferredBytes", "totalBytes", "completedItems", "totalItems"
+  "droppedBytes", "minCursor", "transferredBytes", "aggregateTransferredBytes", "totalBytes", "completedItems", "totalItems"
 ]);
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const logEventValues = new Set<unknown>(Object.values(LogEvents));

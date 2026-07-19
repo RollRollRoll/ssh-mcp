@@ -86,6 +86,7 @@ describe("SecretRedactor", () => {
       droppedBytes: 2,
       minCursor: 8,
       transferredBytes: 13,
+      aggregateTransferredBytes: 34,
       totalBytes: 21,
       completedItems: 1,
       totalItems: 3,
@@ -95,6 +96,7 @@ describe("SecretRedactor", () => {
       droppedBytes: 2,
       minCursor: 8,
       transferredBytes: 13,
+      aggregateTransferredBytes: 34,
       totalBytes: 21,
       completedItems: 1,
       totalItems: 3

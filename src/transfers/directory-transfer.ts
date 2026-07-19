@@ -93,6 +93,7 @@ class DirectoryTransferExecution implements OperationRunner {
   private transferredBytes = 0;
   private totalBytes: number | undefined;
   private aggregateTransferredBytes = 0;
+  private currentBytesAggregated = false;
   private totalItems = 0;
   private targetCreated = false;
   private targetCreationAttempted = false;
@@ -230,6 +231,7 @@ class DirectoryTransferExecution implements OperationRunner {
   private async transferFile(entry: DirectoryWalkEntry): Promise<void> {
     this.currentItem = entry.relativePath;
     this.transferredBytes = 0;
+    this.currentBytesAggregated = false;
     this.totalBytes = entry.size;
     this.resetCommitState();
     this.filePrepareStarted = true;
@@ -248,7 +250,7 @@ class DirectoryTransferExecution implements OperationRunner {
         },
         onPhase: (phase) => { this.observeFilePhase(phase); }
       });
-      this.aggregateTransferredBytes = checkedAdd(this.aggregateTransferredBytes, this.transferredBytes);
+      this.aggregateCurrentBytes();
       this.succeeded.push(entry.relativePath);
       if (outcome.temporaryCleanup === "failed") {
         this.issues.push(Object.freeze({ relativePath: entry.relativePath, code: ErrorCodes.PARTIAL_FAILURE, kind: "cleanup" }));
@@ -285,9 +287,9 @@ class DirectoryTransferExecution implements OperationRunner {
       }
       this.current = undefined;
       this.filePrepareStarted = false;
+      this.aggregateCurrentBytes();
       const unknown = !cleanupConfirmed || !closeConfirmed || this.commitState === "started";
       if (this.commitState === "committed" && !this.succeeded.includes(entry.relativePath)) {
-        this.aggregateTransferredBytes = checkedAdd(this.aggregateTransferredBytes, this.transferredBytes);
         this.succeeded.push(entry.relativePath);
       } else if (!this.succeeded.includes(entry.relativePath)) {
         this.recordFailure(entry.relativePath, errorCode(error), unknown ? "unknown" : "confirmed");
@@ -396,6 +398,7 @@ class DirectoryTransferExecution implements OperationRunner {
     return Object.freeze({
       operationId: this.operationId,
       host: this.request.host.alias,
+      aggregateTransferredBytes: this.observedAggregateTransferredBytes(),
       transferredBytes: this.transferredBytes,
       ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
       completedItems: this.succeeded.length,
@@ -409,7 +412,7 @@ class DirectoryTransferExecution implements OperationRunner {
       ...(this.currentItem === undefined ? {} : { currentItem: this.currentItem }),
       transferredBytes: this.transferredBytes,
       ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
-      aggregateTransferredBytes: this.aggregateTransferredBytes,
+      aggregateTransferredBytes: this.observedAggregateTransferredBytes(),
       completedItems: this.succeeded.length, totalItems: this.totalItems,
       succeeded: Object.freeze([...this.succeeded]), failed: Object.freeze([...this.failed]), notExecuted: Object.freeze([...this.notExecuted]),
       issues: Object.freeze([...this.issues]),
@@ -433,6 +436,18 @@ class DirectoryTransferExecution implements OperationRunner {
   private backgroundFailure(error: unknown): void {
     if (isUnavailable(error)) return;
     try { this.finishUnknown(errorCode(error)); } catch { /* 后台边界不得产生未处理拒绝。 */ }
+  }
+
+  private aggregateCurrentBytes(): void {
+    if (this.currentBytesAggregated) return;
+    this.aggregateTransferredBytes = checkedAdd(this.aggregateTransferredBytes, this.transferredBytes);
+    this.currentBytesAggregated = true;
+  }
+
+  private observedAggregateTransferredBytes(): number {
+    return this.currentBytesAggregated
+      ? this.aggregateTransferredBytes
+      : checkedAdd(this.aggregateTransferredBytes, this.transferredBytes);
   }
 }
 

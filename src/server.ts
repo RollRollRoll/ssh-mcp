@@ -187,13 +187,16 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
   registerSessionTools(server, { registry, approval, sessions, adapter });
   const transferProgress = (event: {
     operationId: string; host: string; transferredBytes: number; totalBytes?: number;
-    completedItems: number; totalItems?: number;
+    aggregateTransferredBytes?: number; completedItems: number; totalItems?: number;
   }): void => logger.info(LogEvents.TRANSFER_PROGRESS, {
     operationId: event.operationId,
     host: event.host,
     state: "running",
     details: {
       transferredBytes: event.transferredBytes,
+      ...(event.aggregateTransferredBytes === undefined ? {} : {
+        aggregateTransferredBytes: event.aggregateTransferredBytes
+      }),
       ...(event.totalBytes === undefined ? {} : { totalBytes: event.totalBytes }),
       completedItems: event.completedItems,
       ...(event.totalItems === undefined ? {} : { totalItems: event.totalItems })

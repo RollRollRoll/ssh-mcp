@@ -1,4 +1,5 @@
 import { PassThrough, Readable } from "node:stream";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { lstat, mkdtemp, open, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -169,6 +170,111 @@ describe("TransferService 单文件生命周期", () => {
     expect(sftpCloses).toBe(1);
     expect(connectionCloses).toBe(1);
   });
+
+  it.each(["cancel", "timeout"] as const)(
+    "生产 SFTP 已打开远端 handle 后遇到 %s，挂起 close 也必须有界继续关闭 SFTP 与 SSH",
+    async (stopMode) => {
+      const localRoot = await mkdtemp(join(await realpath(tmpdir()), `ssh-mcp-hung-handle-${stopMode}-`));
+      const target = join(localRoot, "target.bin");
+      const temporaryTarget = join(localRoot, ".ssh-mcp-fixed.part");
+      const source = new PassThrough();
+      const events: string[] = [];
+      const unhandled: unknown[] = [];
+      let openedHandles = 0;
+      let handleCloses = 0;
+      let sftpCloses = 0;
+      let connectionCloses = 0;
+      let rejectLateHandleClose: ((error: Error) => void) | undefined;
+      let cleanupBeforeHandleClose: Promise<boolean> | undefined;
+      const listener = (error: unknown): void => { unhandled.push(error); };
+      process.on("unhandledRejection", listener);
+      try {
+        const sftp: SftpTransferSession = {
+          lstat: async (value) => {
+            if (value === "/") return { kind: "directory", id: "root", size: 0 };
+            if (value === "/safe") return { kind: "directory", id: "safe", size: 0 };
+            if (value === "/safe/source.bin") return { kind: "file", id: "source", size: 4 };
+            throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          },
+          realpath: async (value) => value,
+          createReadStream: () => { throw new Error("必须使用 opened file"); },
+          openReadFile: async () => {
+            openedHandles += 1;
+            return {
+              stream: source,
+              stat: { kind: "file", id: "source", size: 4 },
+              close: async () => {
+                handleCloses += 1;
+                events.push("handle-close");
+                cleanupBeforeHandleClose = lstat(temporaryTarget).then(
+                  () => false,
+                  (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT"
+                );
+                if (stopMode === "cancel") {
+                  return await new Promise<never>((_resolve, reject) => { rejectLateHandleClose = reject; });
+                }
+                return await new Promise<never>(() => undefined);
+              }
+            };
+          },
+          createWriteStream: () => { throw new Error("不应创建远端目标"); },
+          supportsAtomicReplace: true,
+          supportsHardlink: true,
+          atomicReplace: async () => undefined,
+          hardlink: async () => undefined,
+          unlink: async () => undefined,
+          close: () => { sftpCloses += 1; events.push("sftp-close"); }
+        };
+        const connection: SshConnection = {
+          exec: () => undefined,
+          openShell: () => undefined,
+          openSftp: (callback) => callback(undefined, sftp),
+          close: () => { connectionCloses += 1; events.push("connection-close"); }
+        };
+        const manager = new OperationManager({
+          idFactory: () => `hung-handle-${stopMode}`,
+          limits: {
+            transferTimeoutMs: stopMode === "timeout" ? 30 : 10_000,
+            cancelConfirmationTimeoutMs: 300
+          }
+        });
+        const service = new TransferService(manager, new SftpTransferBackend(
+          { connect: async () => connection }, [localRoot], {
+            localPlatform: "posix", temporaryIdFactory: () => "fixed", cleanupTimeoutMs: 20
+          }
+        ));
+        const started = service.start({
+          direction: "download", host, source: "/safe/source.bin", target, overwrite: false, recursive: false,
+          expectedSourceIdentity: { kind: "file", id: "source", size: 4 }
+        });
+        await waitUntil(() => openedHandles === 1);
+        await waitUntil(() => existsSync(temporaryTarget));
+        if (stopMode === "cancel") {
+          manager.cancel(started.operationId);
+          manager.cancel(started.operationId);
+        }
+
+        await waitUntil(() => sftpCloses === 1 && connectionCloses === 1);
+        await terminal(manager, started.operationId);
+
+        expect(manager.get(started.operationId)).toMatchObject({
+          state: "unknown",
+          error: { code: ErrorCodes.STATE_UNKNOWN, sideEffects: "possible" },
+          result: { temporaryCleanup: "removed", completedItems: 0 }
+        });
+        expect(handleCloses).toBe(1);
+        expect(sftpCloses).toBe(1);
+        expect(connectionCloses).toBe(1);
+        expect(events).toEqual(["handle-close", "sftp-close", "connection-close"]);
+        await expect(cleanupBeforeHandleClose).resolves.toBe(true);
+        rejectLateHandleClose?.(new Error("迟到的 handle close 拒绝"));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.removeListener("unhandledRejection", listener);
+      }
+    }
+  );
 
   it("源大小与实际字节不一致时不提交并清理临时目标", async () => {
     let committed = 0;
