@@ -80,6 +80,28 @@ describe("SecretRedactor", () => {
     })).toEqual({});
   });
 
+  it("输出截断与传输进度只保留非负安全整数，不接受路径或命令", () => {
+    const redactor = new SecretRedactor();
+    expect(redactor.redact({
+      droppedBytes: 2,
+      minCursor: 8,
+      transferredBytes: 13,
+      totalBytes: 21,
+      completedItems: 1,
+      totalItems: 3,
+      currentItem: "/secret/path",
+      command: "cat /secret/path"
+    })).toEqual({
+      droppedBytes: 2,
+      minCursor: 8,
+      transferredBytes: 13,
+      totalBytes: 21,
+      completedItems: 1,
+      totalItems: 3
+    });
+    expect(redactor.redact({ droppedBytes: -1, transferredBytes: 1.5, totalBytes: Number.MAX_SAFE_INTEGER + 1 })).toEqual({});
+  });
+
   it.each([
     ["嵌套 settings", "settings={auth:{token:settings-token-nested}}", "settings-token-nested"],
     ["带空格的 identityFile", "identityFile = /Users/dev/.ssh/identity file", "/Users/dev/.ssh/identity file"],

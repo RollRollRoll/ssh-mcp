@@ -41,6 +41,11 @@ export class HostRegistry {
     this.connectionStates.set(alias, connectionState);
   }
 
+  public connectionState(alias: string): ConnectionState {
+    this.assertRegistered(alias);
+    return this.connectionStates.get(alias) ?? "unknown";
+  }
+
   /** 连接状态只表示当前进程仍持有的活动连接，不把历史成功当作当前已连接。 */
   public connectionOpened(alias: string): void {
     this.assertRegistered(alias);

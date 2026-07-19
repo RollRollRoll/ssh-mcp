@@ -7,6 +7,7 @@ import { MultiHostCoordinator } from "../multihost/multi-host-coordinator.js";
 import { OperationManagerError } from "../operations/operation-manager.js";
 import { ProfileCompiler } from "../policy/profile-compiler.js";
 import { PolicyEngine } from "../policy/policy-engine.js";
+import { ProfileRemotePathVerifier } from "../policy/profile-remote-path-verifier.js";
 
 const ProfileRunInputSchema = z.object({
   profileId: z.string().min(1),
@@ -36,6 +37,7 @@ export interface ProfileRunDependencies {
   readonly runner: CommandRunner;
   readonly policy: PolicyEngine;
   readonly coordinator?: MultiHostCoordinator;
+  readonly pathVerifier?: ProfileRemotePathVerifier;
 }
 
 /** Profile 只能完整命中启动时规则；拒绝时不创建操作、不连接且不进入审批路径。 */
@@ -57,17 +59,28 @@ export function registerProfileRunTool(server: McpServer, dependencies: ProfileR
       if (decisions.length === 1) {
         const first = decisions[0]!;
         if (!first.decision.matched) throw new Error("已验证的 Profile 匹配缺失");
-        return successResult(dependencies.runner.start(first.host, compiler.compile(first.decision.match)));
+        return successResult(dependencies.runner.start(
+          first.host,
+          compiler.compile(first.decision.match),
+          undefined,
+          (dependencies.pathVerifier ?? new ProfileRemotePathVerifier()).create(first.decision.match)
+        ));
       }
       if (dependencies.coordinator === undefined) throw new Error("多主机协调器不可用");
       const commands = new Map(decisions.map(({ host, decision }) => {
         if (!decision.matched) throw new Error("已验证的 Profile 匹配缺失");
-        return [host.alias, compiler.compile(decision.match)] as const;
+        return [host.alias, {
+          command: compiler.compile(decision.match),
+          preflight: (dependencies.pathVerifier ?? new ProfileRemotePathVerifier()).create(decision.match)
+        }] as const;
       }));
       return successResult(dependencies.coordinator.start({
         hosts: decisions.map(({ host }) => host), executionMode: executionMode ?? "parallel", timeoutKind: "command",
         failureCode: ErrorCodes.COMMAND_FAILED, timeoutCode: ErrorCodes.COMMAND_TIMEOUT,
-        start: (host) => dependencies.runner.start(host, commands.get(host.alias)!)
+        start: (host) => {
+          const selected = commands.get(host.alias)!;
+          return dependencies.runner.start(host, selected.command, undefined, selected.preflight);
+        }
       }));
     } catch (error: unknown) {
       if (error instanceof OperationManagerError) return errorResult(error.error);

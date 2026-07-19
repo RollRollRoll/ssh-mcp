@@ -12,6 +12,9 @@ import { OperationManager } from "../../../src/operations/operation-manager.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
 import { SshAdapter } from "../../../src/ssh/ssh-adapter.js";
 import { TrustStore } from "../../../src/ssh/trust-store.js";
+import { ProfileCompiler } from "../../../src/policy/profile-compiler.js";
+import { PolicyEngine } from "../../../src/policy/policy-engine.js";
+import { ProfileRemotePathVerifier } from "../../../src/policy/profile-remote-path-verifier.js";
 
 const execute = promisify(execFile);
 const fixtureDirectory = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/openssh-linux");
@@ -45,6 +48,35 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH command", () => {
+  it("低风险 Profile 在 exec 前拒绝根内指向根外的真实 symlink", async () => {
+    const target = `/tmp/ssh-mcp-profile-link-${process.pid}-${Date.now()}`;
+    const manager = new OperationManager({ idFactory: sequence("create-link", "profile-link", "cleanup-link") });
+    const runner = createRunner(manager);
+    try {
+      await terminal(manager, runner.start(host(), `ln -s -- /etc/passwd '${target}'`).operationId);
+      const decision = new PolicyEngine([{
+        id: "cat-safe", hostAliases: ["linux"], platform: "linux", executable: "/bin/cat", fixedArgs: [],
+        parameters: [{ type: "remotePath", name: "path", required: true }]
+      }]).evaluate({ profileId: "cat-safe", host: host(), parameters: { path: target } });
+      expect(decision.matched).toBe(true);
+      if (!decision.matched) return;
+      const operation = runner.start(
+        host(),
+        new ProfileCompiler().compile(decision.match),
+        undefined,
+        new ProfileRemotePathVerifier().create(decision.match)
+      );
+      await terminal(manager, operation.operationId);
+      expect(manager.get(operation.operationId)).toMatchObject({
+        state: "failed",
+        error: { code: "POLICY_REQUIRES_APPROVAL", sideEffects: "none" },
+        result: { stdoutBytes: 0, stderrBytes: 0 }
+      });
+    } finally {
+      await terminal(manager, runner.start(host(), `rm -f -- '${target}'`).operationId);
+    }
+  });
+
   testWithIds(["SC-021", "SC-022", "SC-024", "SC-051", "SC-054"], "真实覆盖 exit 0/非零、stdout/stderr、中文 CRLF、无效 UTF-8 与有界输出", async () => {
     const manager = new OperationManager({ idFactory: sequence("ok", "bad"), outputBufferBytes: 128 });
     const runner = createRunner(manager);

@@ -69,6 +69,9 @@ const safeTimeoutKinds = new Set(["connect", "command", "session", "transfer", "
 const safeTemporaryCleanupStates = new Set(["not_needed", "removed", "failed", "unknown"]);
 const safeFinalTargetCommitStates = new Set(["not_committed", "committed", "unknown"]);
 const safeCommitOutcomes = new Set(["unknown"]);
+const safeNumericDetails = new Set([
+  "droppedBytes", "minCursor", "transferredBytes", "totalBytes", "completedItems", "totalItems"
+]);
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const logEventValues = new Set<unknown>(Object.values(LogEvents));
 const logStateValues = new Set<unknown>(Object.values(LogStates));
@@ -80,7 +83,7 @@ export class SecretRedactor {
     if (!isPlainObject(value)) {
       return {};
     }
-    const details: Record<string, string> = {};
+    const details: Record<string, string | number> = {};
     for (const [key, detail] of Object.entries(value)) {
       if (key === "reason" && typeof detail === "string" && safeDetailReasons.has(detail)) {
         details.reason = detail;
@@ -99,6 +102,9 @@ export class SecretRedactor {
       }
       if (key === "commitOutcome" && typeof detail === "string" && safeCommitOutcomes.has(detail)) {
         details.commitOutcome = detail;
+      }
+      if (safeNumericDetails.has(key) && typeof detail === "number" && Number.isSafeInteger(detail) && detail >= 0) {
+        details[key] = detail;
       }
     }
     return details;

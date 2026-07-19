@@ -68,6 +68,20 @@ export interface CreateOperationOptions {
   readonly runner?: OperationRunner;
   readonly timeoutKind?: OperationTimeoutKind;
   readonly timeoutMs?: number;
+  /** ApprovalService 自行持有 Elicitation 截止时间时，禁止登记第二个竞争计时器。 */
+  readonly approvalTimeoutManagedExternally?: boolean;
+  readonly target?: OperationTargetSummary;
+}
+
+export interface OperationTargetSummary {
+  readonly hosts: readonly string[];
+}
+
+export interface OutputTruncatedEvent {
+  readonly operationId: string;
+  readonly host?: string;
+  readonly droppedBytes: number;
+  readonly minCursor: number;
 }
 
 export interface OperationManagerOptions {
@@ -76,11 +90,15 @@ export interface OperationManagerOptions {
   readonly limits?: Partial<OperationLimits>;
   readonly outputBufferBytes?: number;
   readonly onStateChange?: (snapshot: OperationSnapshot) => void;
+  readonly onOutputTruncated?: (event: OutputTruncatedEvent) => void;
 }
 
 export interface OperationSnapshot {
   readonly operationId: string;
   readonly state: OperationState;
+  readonly host?: string;
+  readonly target?: OperationTargetSummary;
+  readonly lastStateChangeAt: number;
   readonly result?: Readonly<Record<string, unknown>>;
   readonly error?: McpOperationError;
 }
@@ -102,6 +120,8 @@ interface OperationRecord {
   readonly id: string;
   readonly machine: OperationStateMachine;
   readonly output: OutputBuffer;
+  readonly target: OperationTargetSummary | undefined;
+  lastStateChangeAt: number;
   runner: OperationRunner | undefined;
   cancelReason: "cancel" | "timeout" | undefined;
   timeoutKind: OperationTimeoutKind | undefined;
@@ -122,6 +142,7 @@ export class OperationManager {
   private readonly idFactory: () => string;
   private readonly outputBufferBytes: number;
   private readonly onStateChange: ((snapshot: OperationSnapshot) => void) | undefined;
+  private readonly onOutputTruncated: ((event: OutputTruncatedEvent) => void) | undefined;
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
 
@@ -131,6 +152,7 @@ export class OperationManager {
     this.limits = { ...DEFAULT_OPERATION_LIMITS, ...options.limits };
     this.outputBufferBytes = options.outputBufferBytes ?? DEFAULT_OUTPUT_BUFFER_BYTES;
     this.onStateChange = options.onStateChange;
+    this.onOutputTruncated = options.onOutputTruncated;
     for (const value of Object.values(this.limits)) {
       if (!Number.isSafeInteger(value) || value <= 0) {
         throw new RangeError("操作时间预算必须是正安全整数");
@@ -168,6 +190,8 @@ export class OperationManager {
       id,
       machine: new OperationStateMachine(initialState),
       output: new OutputBuffer(this.outputBufferBytes),
+      target: freezeTarget(options.target),
+      lastStateChangeAt: this.clock.now(),
       runner: options.runner,
       cancelReason: undefined,
       timeoutKind,
@@ -181,7 +205,7 @@ export class OperationManager {
     this.records.set(id, record);
     if (initialState === "running") {
       if (timeoutMs !== undefined) this.scheduleOperationTimeout(record, timeoutMs, timeoutKind);
-    } else {
+    } else if (options.approvalTimeoutManagedExternally !== true) {
       this.scheduleApprovalTimeout(record);
     }
     const snapshot = this.snapshot(record);
@@ -210,6 +234,7 @@ export class OperationManager {
     const effectiveTimeoutKind = timeoutKind ?? record.timeoutKind ?? "command";
     const effectiveTimeoutMs = this.resolveOperationTimeout(timeoutMs, effectiveTimeoutKind);
     record.machine.transition("running");
+    this.markStateChange(record);
     record.runner = runner;
     this.scheduleOperationTimeout(record, effectiveTimeoutMs, effectiveTimeoutKind);
     const snapshot = this.snapshot(record);
@@ -288,7 +313,15 @@ export class OperationManager {
   public appendOutput(id: string, stream: OutputStream, data: Buffer, metadata?: Readonly<{ host?: string }>): void {
     const record = this.record(id);
     if (record.machine.state === "running") {
-      record.output.append(stream, data, metadata);
+      const appended = record.output.append(stream, data, metadata);
+      if (appended !== undefined && appended.droppedBytes > 0) {
+        this.onOutputTruncated?.({
+          operationId: record.id,
+          ...(record.target?.hosts.length === 1 ? { host: record.target.hosts[0] } : {}),
+          droppedBytes: appended.droppedBytes,
+          minCursor: appended.minCursor
+        });
+      }
       this.notifyChanged(record);
     }
   }
@@ -373,6 +406,7 @@ export class OperationManager {
       return this.snapshot(record);
     }
     record.machine.transition(state);
+    this.markStateChange(record);
     const cancelReason = record.cancelReason;
     this.clearTimer(record.timeoutTimer);
     this.clearTimer(record.cancellationTimer);
@@ -525,7 +559,20 @@ export class OperationManager {
   }
 
   private snapshot(record: OperationRecord): OperationSnapshot {
-    return Object.freeze({ operationId: record.id, state: record.machine.state, ...(record.result === undefined ? {} : { result: record.result }), ...(record.error === undefined ? {} : { error: record.error }) });
+    return Object.freeze({
+      operationId: record.id,
+      state: record.machine.state,
+      ...(record.target?.hosts.length === 1 ? { host: record.target.hosts[0] } : {}),
+      ...(record.target === undefined ? {} : { target: record.target }),
+      lastStateChangeAt: record.lastStateChangeAt,
+      ...(record.result === undefined ? {} : { result: record.result }),
+      ...(record.error === undefined ? {} : { error: record.error })
+    });
+  }
+
+  private markStateChange(record: OperationRecord): void {
+    const now = this.clock.now();
+    record.lastStateChangeAt = Number.isFinite(now) ? Math.max(record.lastStateChangeAt, now) : record.lastStateChangeAt;
   }
 
   private error(
@@ -550,6 +597,16 @@ export class OperationManager {
       allowedOperationIds: operationId === undefined ? undefined : new Set([operationId])
     });
   }
+}
+
+function freezeTarget(target: OperationTargetSummary | undefined): OperationTargetSummary | undefined {
+  if (target === undefined) return undefined;
+  if (!Array.isArray(target.hosts) || target.hosts.length < 1 || target.hosts.length > 10
+    || target.hosts.some((host) => typeof host !== "string" || host.length === 0)
+    || new Set(target.hosts).size !== target.hosts.length) {
+    throw new RangeError("操作目标主机摘要无效");
+  }
+  return Object.freeze({ hosts: Object.freeze([...target.hosts]) });
 }
 
 const systemClock: MonotonicClock = {

@@ -161,6 +161,31 @@ describe("MultiHostCoordinator", () => {
     expect(frames.reduce((total, frame) => total + Buffer.byteLength(frame.data, frame.encoding), 0)).toBe(payload.length);
   });
 
+  it("同一子操作两轮独立淘汰按逐请求缺口累计 droppedBytes", async () => {
+    const manager = new OperationManager({
+      idFactory: sequence("outer", "one"),
+      outputBufferBytes: 5
+    });
+    const coordinator = new MultiHostCoordinator(manager);
+    let childId = "";
+    const outer = coordinator.start(options([hosts[0]!], "parallel", () => {
+      const snapshot = manager.create({ initialState: "running", runner: { cancel: () => undefined } });
+      childId = snapshot.operationId;
+      manager.appendOutput(childId, "stdout", Buffer.from("0123456789"));
+      return snapshot;
+    }));
+
+    await eventually(() => childId.length > 0 && manager.get(outer.operationId).result !== undefined);
+    await eventually(() => ((manager.get(outer.operationId).result?.hosts as Array<{ output?: { droppedBytes?: number } }>)[0]?.output?.droppedBytes ?? 0) === 5);
+    manager.appendOutput(childId, "stdout", Buffer.from("abcdefgh"));
+    manager.complete(childId);
+
+    const terminalSnapshot = await terminal(manager, outer.operationId);
+    expect(terminalSnapshot).toMatchObject({
+      result: { hosts: [{ host: "host-1", output: { truncated: true, droppedBytes: 8 } }] }
+    });
+  });
+
   it("顺序模式将每台取消确认窗口计入父预算，首台超时后仍启动下一台", async () => {
     const clock = new FakeClock();
     const manager = new OperationManager({

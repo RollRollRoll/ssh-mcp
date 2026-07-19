@@ -3,7 +3,7 @@ import path from "node:path";
 import { link, lstat, open, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
-import { AtomicTarget, AtomicTargetError, type AtomicTargetPort, type TemporaryWriter } from "./atomic-target.js";
+import { AtomicTarget, type AtomicTargetPort, type TemporaryWriter } from "./atomic-target.js";
 import {
   TransferPreparationError,
   type PreparedTransfer,
@@ -25,6 +25,7 @@ import {
   type SshAdapter,
   type SshConnection
 } from "../ssh/ssh-adapter.js";
+import { AbortableSftpConnection } from "./abortable-sftp.js";
 
 export interface SftpTransferBackendOptions {
   readonly localPlatform?: PathPlatform;
@@ -46,18 +47,22 @@ export class SftpTransferBackend implements TransferBackend {
     const resources = new ResourceClosers();
     let connection: SshConnection | undefined;
     let sftp: SftpTransferSession | undefined;
+    let abortable: AbortableSftpConnection | undefined;
     try {
       throwIfAborted(signal);
       connection = await this.adapter.connect(request.host);
-      resources.add(() => connection!.close());
+      abortable = new AbortableSftpConnection(connection, signal,
+        () => Object.assign(new Error("传输已取消"), { code: ErrorCodes.TRANSFER_FAILED }));
+      resources.add(async () => await abortable!.close());
       throwIfAborted(signal);
-      sftp = await openSftp(connection);
-      resources.add(() => sftp!.close());
+      sftp = await abortable.openSftp();
       throwIfAborted(signal);
       const sourceMountVerifier = createActualConnectionMountVerifier(request, connection);
-      return request.direction === "upload"
+      const prepared = request.direction === "upload"
         ? await this.prepareUpload(request, connection, sftp, signal, resources, sourceMountVerifier)
         : await this.prepareDownload(request, connection, sftp, signal, resources, sourceMountVerifier);
+      abortable.disarm();
+      return prepared;
     } catch (error: unknown) {
       let resourceCloseFailed = false;
       try { await resources.closeAll(); } catch { resourceCloseFailed = true; }
@@ -377,11 +382,6 @@ async function destroyStream(stream: Writable): Promise<void> {
     stream.once("close", done); stream.once("error", done);
     if (!stream.destroyed) stream.destroy();
   });
-}
-
-async function openSftp(connection: SshConnection): Promise<SftpTransferSession> {
-  if (connection.openSftp === undefined) throw new AtomicTargetError(ErrorCodes.TRANSFER_FAILED);
-  return await new Promise((resolve, reject) => connection.openSftp!((error, sftp) => error === undefined ? resolve(sftp) : reject(error)));
 }
 
 function isNotFound(error: unknown): boolean {

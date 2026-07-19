@@ -19,6 +19,7 @@ import {
 } from "./directory-transfer.js";
 import type { TransferRequest } from "./file-transfer.js";
 import { SftpTransferBackend } from "./sftp-transfer-backend.js";
+import { AbortableSftpConnection } from "./abortable-sftp.js";
 
 export interface SftpDirectoryTransferBackendOptions {
   readonly localPlatform?: PathPlatform;
@@ -43,9 +44,11 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
     if (!request.recursive) throw new DirectoryTransferSetupError(ErrorCodes.INVALID_ARGUMENT);
     throwIfAborted(signal);
     const connection = await this.adapter.connect(request.host);
+    const abortable = new AbortableSftpConnection(connection, signal,
+      () => new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED));
     let sftp: SftpTransferSession | undefined;
     try {
-      sftp = await openSftp(connection);
+      sftp = await abortable.openSftp();
       if (sftp.readdir === undefined || sftp.mkdir === undefined) throw new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED);
       const sourcePlatform = request.direction === "upload" ? this.localPlatform : remotePlatform(request);
       const targetPlatform = request.direction === "upload" ? remotePlatform(request) : this.localPlatform;
@@ -69,12 +72,7 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
       const sourceAfterWalk = await sourcePort.inspect(sourceRoot);
       if (!sameStat(sourceIdentity, sourceAfterWalk)) throw new DirectoryTransferSetupError(ErrorCodes.PATH_DENIED);
       throwIfAborted(signal);
-      let closed = false;
-      const close = (): void => {
-        if (closed) return;
-        closed = true;
-        try { sftp!.close(); } finally { connection.close(); }
-      };
+      abortable.disarm();
       return Object.freeze({
         entries,
         createTargetRoot: async () => {
@@ -100,10 +98,10 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
             sourceMountProof: { sourceRoot, platform: sourcePlatform }
           }, itemSignal);
         },
-        close: async () => { close(); }
+        close: async () => { await abortable.close(); }
       });
     } catch (error: unknown) {
-      try { sftp?.close(); } finally { connection.close(); }
+      await abortable.close();
       throw normalizeSetupError(error);
     }
   }
@@ -255,11 +253,6 @@ async function remoteGuard(request: TransferRequest, connection: SshConnection, 
     execute: async (command) => await executeBoundedProbe(connection, command, MAX_WINDOWS_REPARSE_PROBE_STDOUT_BYTES)
   }, request.host.shell.command);
   return await new WindowsPathGuard(request.host.remoteRoots, sftp, probe).verify(target);
-}
-
-async function openSftp(connection: SshConnection): Promise<SftpTransferSession> {
-  if (connection.openSftp === undefined) throw new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED);
-  return await new Promise((resolve, reject) => connection.openSftp!((error, sftp) => error === undefined ? resolve(sftp) : reject(error)));
 }
 
 function localStat(status: Stats, mountPoint: boolean): DirectoryWalkStat {

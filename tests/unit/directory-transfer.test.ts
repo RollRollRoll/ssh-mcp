@@ -124,6 +124,46 @@ describe("有界执行探针", () => {
 });
 
 describe("DirectoryTransferService", () => {
+  it("生产目录后端的 lstat 挂起时，超时会关闭 SFTP 与连接各一次", async () => {
+    let sftpCloses = 0;
+    let connectionCloses = 0;
+    const sftp: SftpTransferSession = {
+      lstat: async () => await new Promise<never>(() => undefined),
+      realpath: async (value) => value,
+      createReadStream: () => new PassThrough(),
+      createWriteStream: () => new PassThrough(),
+      readdir: async () => [],
+      mkdir: async () => undefined,
+      supportsAtomicReplace: false,
+      supportsHardlink: false,
+      atomicReplace: async () => undefined,
+      hardlink: async () => undefined,
+      unlink: async () => undefined,
+      close: () => { sftpCloses += 1; }
+    };
+    const manager = new OperationManager({
+      idFactory: () => "directory-hung-lstat",
+      limits: { transferTimeoutMs: 5, cancelConfirmationTimeoutMs: 50 }
+    });
+    const service = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend({
+      connect: async () => ({
+        exec: () => undefined,
+        openShell: () => undefined,
+        openSftp: (callback) => callback(undefined, sftp),
+        close: () => { connectionCloses += 1; }
+      })
+    }, ["/local"], { localPlatform: "posix" }));
+
+    const started = service.start({
+      direction: "download", host, source: "/safe/tree", target: "/local/tree", overwrite: false, recursive: true
+    });
+    await terminal(manager, started.operationId);
+
+    expect(manager.get(started.operationId)).toMatchObject({ state: "timed_out" });
+    expect(sftpCloses).toBe(1);
+    expect(connectionCloses).toBe(1);
+  });
+
   it("目录先于子项创建，普通文件严格串行并发布累计进度和稳定逐项结果", async () => {
     const calls: string[] = [];
     const manager = new OperationManager({ idFactory: () => "directory-ok" });

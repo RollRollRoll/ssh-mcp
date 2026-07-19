@@ -9,7 +9,7 @@ export type OperationState =
   | "unknown";
 
 const transitions: Readonly<Record<OperationState, readonly OperationState[]>> = {
-  awaiting_approval: ["running", "failed"],
+  awaiting_approval: ["running", "failed", "timed_out"],
   running: ["completed", "failed", "timed_out", "cancelled", "partial_failure", "unknown"],
   completed: [],
   failed: [],

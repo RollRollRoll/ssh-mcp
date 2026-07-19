@@ -40,7 +40,9 @@ export function createMcpOperationError(
   const sideEffects = isSideEffects(snapshot.sideEffects) ? snapshot.sideEffects : "none";
   const details = snapshot.details === undefined
     ? undefined
-    : freezeRecursively(redactor.redact(snapshot.details));
+    : freezeRecursively(code === ErrorCodes.HOST_KEY_CHANGED
+      ? hostKeyChangedDetails(snapshot.details)
+      : redactor.redact(snapshot.details));
   return Object.freeze({
     code,
     // 调用方 message 可能包含 SSH、认证或配置原文，绝不进入客户端错误结构。
@@ -57,6 +59,33 @@ export function createMcpOperationError(
       : {}),
     ...(details === undefined ? {} : { details: details as Readonly<Record<string, unknown>> })
   });
+}
+
+/** 只从 HOST_KEY_CHANGED 异常链提取两个可公开的 OpenSSH SHA256 指纹。 */
+export function extractHostKeyChangedDetails(error: unknown): Readonly<Record<string, unknown>> | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 4 && current !== null && typeof current === "object" && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.code === ErrorCodes.HOST_KEY_CHANGED) {
+      return hostKeyChangedDetails(record.details);
+    }
+    current = record.originalError;
+  }
+  return undefined;
+}
+
+function hostKeyChangedDetails(value: unknown): Record<string, string> | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { oldFingerprint, newFingerprint } = value as Record<string, unknown>;
+  if (!isSha256Fingerprint(oldFingerprint) || !isSha256Fingerprint(newFingerprint)) return undefined;
+  return { oldFingerprint, newFingerprint };
+}
+
+function isSha256Fingerprint(value: unknown): value is string {
+  if (typeof value !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(value)) return false;
+  try { return Buffer.from(value.slice(7), "base64").length === 32; } catch { return false; }
 }
 
 const errorMessages: Record<ErrorCode, string> = {

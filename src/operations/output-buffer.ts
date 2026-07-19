@@ -3,6 +3,7 @@ import { ErrorCodes } from "../errors/error-codes.js";
 export const DEFAULT_OUTPUT_BUFFER_BYTES = 8_388_608;
 export const DEFAULT_OUTPUT_READ_BYTES = 65_536;
 export const MAX_OUTPUT_READ_BYTES = 262_144;
+export const MAX_OUTPUT_BUFFER_FRAMES = 4_096;
 
 export type OutputStream = "stdout" | "stderr" | "pty";
 export type OutputEncoding = "utf8" | "base64";
@@ -48,11 +49,14 @@ interface StoredFrame {
 export interface OutputAppendResult {
   readonly cursor: number;
   readonly byteLength: number;
+  readonly droppedBytes: number;
+  readonly minCursor: number;
 }
 
 /** 按接收顺序保存原始字节，游标永不因淘汰而重置。 */
 export class OutputBuffer {
   private readonly frames: StoredFrame[] = [];
+  private head = 0;
   private bytes = 0;
   private endCursor = 0;
   private minimumCursor = 0;
@@ -81,8 +85,14 @@ export class OutputBuffer {
     this.frames.push({ stream, cursor, data: copied, metadata });
     this.endCursor += copied.length;
     this.bytes += copied.length;
+    const previousMinimumCursor = this.minimumCursor;
     this.evictOverflow();
-    return Object.freeze({ cursor, byteLength: copied.length });
+    return Object.freeze({
+      cursor,
+      byteLength: copied.length,
+      droppedBytes: this.minimumCursor - previousMinimumCursor,
+      minCursor: this.minimumCursor
+    });
   }
 
   public read(cursor = 0, maxBytes = DEFAULT_OUTPUT_READ_BYTES): OutputReadResult {
@@ -145,7 +155,7 @@ export class OutputBuffer {
 
   /** 找到第一个结尾严格大于 cursor 的帧，避免每次增量读取重扫历史帧。 */
   private firstFrameEndingAfter(cursor: number): number {
-    let low = 0;
+    let low = this.head;
     let high = this.frames.length;
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2);
@@ -158,18 +168,22 @@ export class OutputBuffer {
   }
 
   private evictOverflow(): void {
-    while (this.bytes > this.capacityBytes) {
-      const oldest = this.frames[0];
+    while (this.bytes > this.capacityBytes || this.frames.length - this.head > MAX_OUTPUT_BUFFER_FRAMES) {
+      const oldest = this.frames[this.head];
       if (oldest === undefined) {
         return;
       }
-      const amount = Math.min(this.bytes - this.capacityBytes, oldest.data.length);
+      const frameLimitExceeded = this.frames.length - this.head > MAX_OUTPUT_BUFFER_FRAMES;
+      const amount = frameLimitExceeded
+        ? oldest.data.length
+        : Math.min(this.bytes - this.capacityBytes, oldest.data.length);
       this.bytes -= amount;
       this.minimumCursor += amount;
       if (amount === oldest.data.length) {
-        this.frames.shift();
+        this.head += 1;
+        this.compactFrames();
       } else {
-        this.frames[0] = {
+        this.frames[this.head] = {
           stream: oldest.stream,
           cursor: oldest.cursor + amount,
           data: oldest.data.subarray(amount),
@@ -177,6 +191,13 @@ export class OutputBuffer {
         };
       }
     }
+  }
+
+  /** 头索引保证逐帧淘汰为 O(1)；稀疏前缀只做摊销压缩。 */
+  private compactFrames(): void {
+    if (this.head < 1_024 || this.head * 2 < this.frames.length) return;
+    this.frames.splice(0, this.head);
+    this.head = 0;
   }
 }
 

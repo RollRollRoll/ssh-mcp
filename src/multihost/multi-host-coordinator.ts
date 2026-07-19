@@ -86,6 +86,7 @@ class MultiHostExecution implements OperationRunner {
     const snapshot = this.existingOperationId === undefined
       ? this.manager.createWithoutBusinessTimeout({
         initialState: "running", runner: this, timeoutKind: this.options.timeoutKind,
+        target: { hosts: this.options.hosts.map((host) => host.alias) },
         // 父操作不得以独立业务计时器抢占已启动子项的超时与停止确认窗口。
       })
       : this.manager.attachRunner(this.existingOperationId, this, this.options.timeoutKind, true);
@@ -198,7 +199,7 @@ class MultiHostExecution implements OperationRunner {
       const snapshot = this.manager.get(child.operationId!, child.outputCursor, DEFAULT_OUTPUT_READ_BYTES);
       this.applySnapshot(child, snapshot);
       child.outputTruncated ||= snapshot.truncated;
-      child.outputDroppedBytes = Math.max(child.outputDroppedBytes, snapshot.droppedBytes);
+      child.outputDroppedBytes = checkedDroppedBytes(child.outputDroppedBytes, snapshot.droppedBytes);
       const previousCursor = child.outputCursor;
       for (const frame of snapshot.frames) {
         this.manager.appendOutput(this.operationId, frame.stream, frameBytes(frame), { host: child.host.alias });
@@ -283,6 +284,14 @@ class MultiHostExecution implements OperationRunner {
     }
     void error;
   }
+}
+
+function checkedDroppedBytes(total: number, dropped: number): number {
+  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(dropped) || dropped < 0
+    || !Number.isSafeInteger(total + dropped)) {
+    throw new RangeError("多主机输出丢失字节累计超出安全整数范围");
+  }
+  return total + dropped;
 }
 
 function frameBytes(frame: OperationGetResult["frames"][number]): Buffer {

@@ -77,9 +77,21 @@ describe("MCP Inspector 协议验收", () => {
     }));
     expect(started).toMatchObject({ state: "running", operationId: expect.any(String) });
     const operationId = String(started.operationId);
-    expect(toolStructured(await session.callTool("operation_get", { operationId }))).toMatchObject({ operationId, state: "running" });
-    expect(toolStructured(await session.callTool("operation_cancel", { operationId }))).toMatchObject({ operationId, state: "cancelled" });
-    expect(toolStructured(await session.callTool("operation_get", { operationId }))).toMatchObject({ operationId, state: "cancelled" });
+    const running = toolStructured(await session.callTool("operation_get", { operationId }));
+    expect(running).toMatchObject({
+      operationId,
+      host: "linux-test",
+      target: { hosts: ["linux-test"] },
+      state: "running",
+      result: { host: "linux-test", stdoutBytes: 0, stderrBytes: 0 },
+      frames: [],
+      lastStateChangeAt: expect.any(Number)
+    });
+    const cancelled = toolStructured(await session.callTool("operation_cancel", { operationId }));
+    expect(cancelled).toMatchObject({ operationId, state: "cancelled" });
+    const terminal = toolStructured(await session.callTool("operation_get", { operationId }));
+    expect(terminal).toMatchObject({ operationId, state: "cancelled", host: "linux-test" });
+    expect(Number(terminal.lastStateChangeAt)).toBeGreaterThanOrEqual(Number(running.lastStateChangeAt));
     expect(existsSync(fixture.trustStorePath)).toBe(false);
   });
 

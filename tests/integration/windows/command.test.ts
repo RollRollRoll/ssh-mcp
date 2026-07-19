@@ -6,6 +6,7 @@ import type { HostConfig } from "../../../src/config/schema.js";
 import { OperationManager } from "../../../src/operations/operation-manager.js";
 import { ProfileCompiler } from "../../../src/policy/profile-compiler.js";
 import { PolicyEngine } from "../../../src/policy/policy-engine.js";
+import { ProfileRemotePathVerifier } from "../../../src/policy/profile-remote-path-verifier.js";
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
 import { SshAdapter } from "../../../src/ssh/ssh-adapter.js";
 import { TrustStore } from "../../../src/ssh/trust-store.js";
@@ -43,6 +44,41 @@ describe("Windows OpenSSH command", () => {
     expect(manager.get(operation.operationId).frames).toEqual(expect.arrayContaining([
       expect.objectContaining({ stream: "stdout", encoding: "utf8", data: expect.stringContaining("中文") })
     ]));
+  });
+
+  it.skipIf(!windowsIntegrationAvailable())("低风险 Profile 在 exec 前拒绝真实 junction/reparse point", async () => {
+    let sequence = 0;
+    const manager = new OperationManager({ idFactory: () => `windows-profile-reparse-${++sequence}` });
+    const confirmation: TrustConfirmation = { supportsForm: () => true, confirm: async () => "accept" };
+    const runner = new CommandRunner(
+      new SshAdapter(new StrictHostKeyVerifier(new TrustStore(requiredEnv("SSH_MCP_WINDOWS_TRUST_STORE")), confirmation)),
+      manager
+    );
+    const target = `C:\\Temp\\ssh-mcp-profile-junction-${process.pid}-${Date.now()}`;
+    const actualHost = windowsIntegrationHost();
+    try {
+      await runToTerminal(runner, manager, actualHost,
+        `New-Item -ItemType Junction -Path '${target}' -Target 'C:\\Windows' -ErrorAction Stop | Out-Null`);
+      const decision = new PolicyEngine([{
+        id: "list-safe", hostAliases: [actualHost.alias], platform: "windows", commandType: "cmdlet",
+        executable: "Get-ChildItem", parameters: [{ type: "remotePath", name: "LiteralPath", required: true }]
+      }]).evaluate({ profileId: "list-safe", host: actualHost, parameters: { LiteralPath: target } });
+      expect(decision.matched).toBe(true);
+      if (!decision.matched) return;
+      const operation = runner.start(
+        actualHost,
+        new ProfileCompiler().compile(decision.match),
+        undefined,
+        new ProfileRemotePathVerifier().create(decision.match)
+      );
+      await waitForTerminal(manager, operation.operationId);
+      expect(manager.get(operation.operationId)).toMatchObject({
+        state: "failed", error: { code: "POLICY_REQUIRES_APPROVAL" }, result: { stdoutBytes: 0, stderrBytes: 0 }
+      });
+    } finally {
+      await runToTerminal(runner, manager, actualHost,
+        `Remove-Item -LiteralPath '${target}' -Force -ErrorAction SilentlyContinue`);
+    }
   });
 
   it.skipIf(!windowsIntegrationAvailable())("真实 PowerShell Cmdlet 保持命名参数和 false switch 语义", async () => {

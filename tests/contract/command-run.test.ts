@@ -15,6 +15,7 @@ import { lexicalPathHandle } from "../../src/paths/path-guard.js";
 import { PolicyEngine } from "../../src/policy/policy-engine.js";
 import { createServer } from "../../src/server.js";
 import { runPlatformProbe } from "../../src/ssh/platform-probe.js";
+import { SshAdapterError } from "../../src/ssh/ssh-adapter.js";
 
 const linux: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22,
@@ -101,6 +102,32 @@ describe("command_run MCP 契约", () => {
     expect(intentCommand).toBe("echo 中文");
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(connections).toBe(1);
+  });
+
+  it("HOST_KEY_CHANGED 只向 MCP 公开已验证的旧新 SHA256 指纹", async () => {
+    const oldFingerprint = `SHA256:${Buffer.alloc(32, 1).toString("base64").replace(/=+$/, "")}`;
+    const newFingerprint = `SHA256:${Buffer.alloc(32, 2).toString("base64").replace(/=+$/, "")}`;
+    const { client } = await connect({
+      execute: async (intent, sideEffect) => ({ approved: true as const, intent, value: await sideEffect(intent) })
+    }, () => { throw new SshAdapterError("HOST_KEY_CHANGED", {
+      oldFingerprint,
+      newFingerprint,
+      diagnostic: "不得公开"
+    }); });
+
+    const started = await client.callTool({ name: "command_run", arguments: { hosts: ["linux"], command: "echo never" } });
+    expect(started).toMatchObject({ structuredContent: { operationId: "command-1", state: "running" } });
+    let snapshot: Awaited<ReturnType<Client["callTool"]>> | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      snapshot = await client.callTool({ name: "operation_get", arguments: { operationId: "command-1" } });
+      if ((snapshot.structuredContent as { state?: string } | undefined)?.state === "failed") break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(snapshot).toMatchObject({ structuredContent: {
+      state: "failed",
+      error: { code: "HOST_KEY_CHANGED", details: { oldFingerprint, newFingerprint } }
+    } });
+    expect(JSON.stringify(snapshot)).not.toContain("diagnostic");
   });
 
   it("真实审批服务让同一 Operation 从 awaiting_approval 进入 running，且等待期可查询并占用操作配额", async () => {

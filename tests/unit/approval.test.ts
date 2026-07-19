@@ -14,6 +14,7 @@ import {
   type JsonValue,
   type OperationIntent
 } from "../../src/approval/operation-intent.js";
+import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
 
 describe("OperationIntent", () => {
   testWithIds(["SC-018", "SC-019"], "以稳定 canonical JSON、SHA-256 摘要和深冻结绑定完整操作", () => {
@@ -68,6 +69,34 @@ describe("OperationIntent", () => {
 });
 
 describe("ApprovalService", () => {
+  it("审批服务独占超时结算，同一 operationId 的返回值与持久状态均为 timed_out", async () => {
+    const client = new FakeApprovalClient(true);
+    const clock = new SharedFakeClock();
+    const manager = new OperationManager({
+      clock,
+      idFactory: () => "approval-timeout",
+      limits: { approvalTimeoutMs: 10 }
+    });
+    const events: unknown[] = [];
+    const service = new ApprovalService(client, clock, 10, manager, (event) => events.push(event));
+
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => "never");
+    await Promise.resolve();
+    clock.advance(10);
+
+    await expect(pending).resolves.toMatchObject({
+      approved: false,
+      error: { operationId: "approval-timeout", code: "APPROVAL_TIMEOUT", finalState: "timed_out" }
+    });
+    expect(manager.get("approval-timeout")).toMatchObject({
+      state: "timed_out",
+      error: { operationId: "approval-timeout", code: "APPROVAL_TIMEOUT", finalState: "timed_out" }
+    });
+    expect(events).toEqual([expect.objectContaining({
+      operationId: "approval-timeout", approved: false, state: "timed_out", errorCode: "APPROVAL_TIMEOUT"
+    })]);
+  });
+
   it("shutdown 会中止挂起审批并保证副作用为零，之后的新审批关闭失败", async () => {
     const client = new FakeApprovalClient(true);
     const service = new ApprovalService(client, new FakeClock());
@@ -350,6 +379,28 @@ class FakeClock implements Clock {
     for (const [timerId, callback] of this.timers) {
       this.timers.delete(timerId);
       callback();
+    }
+  }
+}
+
+class SharedFakeClock implements Clock, MonotonicClock {
+  private nowMs = 0;
+  private nextTimerId = 1;
+  private readonly timers = new Map<number, { due: number; callback: () => void }>();
+
+  public now(): number { return this.nowMs; }
+  public setTimeout(callback: () => void, delayMs: number): number {
+    const id = this.nextTimerId++;
+    this.timers.set(id, { due: this.nowMs + delayMs, callback });
+    return id;
+  }
+  public clearTimeout(timer: unknown): void { this.timers.delete(timer as number); }
+  public advance(milliseconds: number): void {
+    this.nowMs += milliseconds;
+    for (;;) {
+      const due = [...this.timers.entries()].filter(([, timer]) => timer.due <= this.nowMs);
+      if (due.length === 0) return;
+      for (const [id, timer] of due) { this.timers.delete(id); timer.callback(); }
     }
   }
 }

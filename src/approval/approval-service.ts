@@ -49,6 +49,7 @@ export interface ApprovalResultEvent {
   readonly operationId?: string;
   readonly digest: string;
   readonly approved: boolean;
+  readonly state: "completed" | McpOperationError["finalState"];
   readonly errorCode?: McpOperationError["code"];
 }
 
@@ -98,13 +99,21 @@ export class ApprovalService {
       return intentMismatchError();
     }
     if (this.shuttingDown) return { approved: false, error: approvalError(ErrorCodes.APPROVAL_DECLINED, "failed", "disconnected") };
-    const awaiting = this.operations?.create({ initialState: "awaiting_approval", timeoutKind: "approval" });
+    const awaiting = this.operations?.create({
+      initialState: "awaiting_approval",
+      timeoutKind: "approval",
+      approvalTimeoutManagedExternally: true,
+      target: { hosts: intent.hosts }
+    });
     const operationId = awaiting?.operationId;
     const approvalFailure = await this.requestApproval(intent);
     if (approvalFailure !== undefined) {
       const error = operationId === undefined ? approvalFailure : withOperationId(approvalFailure, operationId);
-      if (operationId !== undefined) this.operations!.fail(operationId, error);
-      this.onResult?.({ operationId, digest: intent.digest, approved: false, errorCode: error.code });
+      if (operationId !== undefined) {
+        if (error.finalState === "timed_out") this.operations!.timedOut(operationId, error);
+        else this.operations!.fail(operationId, error);
+      }
+      this.onResult?.({ operationId, digest: intent.digest, approved: false, state: error.finalState, errorCode: error.code });
       return { approved: false, error };
     }
     if (!consumeVerifiedOperationIntent(intent)) {
@@ -112,7 +121,7 @@ export class ApprovalService {
       if (operationId === undefined) return mismatch;
       const error = withOperationId(mismatch.error, operationId);
       this.operations!.fail(operationId, error);
-      this.onResult?.({ operationId, digest: intent.digest, approved: false, errorCode: error.code });
+      this.onResult?.({ operationId, digest: intent.digest, approved: false, state: "failed", errorCode: error.code });
       return { approved: false, error };
     }
     if (operationId !== undefined) this.operations!.start(operationId, undefined, undefined, options.timeoutKind ?? "command");
@@ -124,7 +133,7 @@ export class ApprovalService {
     try {
       const value = await sideEffect(intent, context);
       if (operationId !== undefined && !background) this.operations!.complete(operationId);
-      this.onResult?.({ operationId, digest: intent.digest, approved: true });
+      this.onResult?.({ operationId, digest: intent.digest, approved: true, state: "completed" });
       return { approved: true, intent, value };
     } catch (error: unknown) {
       if (operationId !== undefined && !background) {

@@ -10,6 +10,7 @@ import { createMcpOperationError } from "../../src/errors/error-contract.js";
 import { createServer } from "../../src/server.js";
 import { ApprovalService } from "../../src/approval/approval-service.js";
 import { TransferService } from "../../src/transfers/file-transfer.js";
+import { SshAdapterError } from "../../src/ssh/ssh-adapter.js";
 
 const host: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22,
@@ -20,6 +21,45 @@ const host: HostConfig = {
 describe("file_upload/file_download MCP 契约", () => {
   const closers: Array<() => Promise<void>> = [];
   afterEach(async () => { await Promise.all(closers.splice(0).map((close) => close())); });
+
+  it("传输后台 HOST_KEY_CHANGED 通过 operation_get 只公开旧新指纹", async () => {
+    const oldFingerprint = `SHA256:${Buffer.alloc(32, 5).toString("base64").replace(/=+$/, "")}`;
+    const newFingerprint = `SHA256:${Buffer.alloc(32, 6).toString("base64").replace(/=+$/, "")}`;
+    const registry = new HostRegistry([host]);
+    const manager = new OperationManager({ idFactory: () => "transfer-host-key" });
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => true,
+      elicit: async () => ({ action: "accept" })
+    }, undefined, 5_000, manager);
+    const transfer = new TransferService(manager, {
+      prepare: async () => { throw new SshAdapterError("HOST_KEY_CHANGED", {
+        oldFingerprint, newFingerprint, diagnostic: "drop-me"
+      }); }
+    });
+    const server = createServer(registry, manager, undefined, undefined, undefined, {
+      registry, approval, transfer, localRoots: ["/local"], localPlatform: "posix"
+    });
+    const client = new Client({ name: "contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    const started = await client.callTool({ name: "file_upload", arguments: {
+      hosts: ["linux"], localSource: "/local/source", remoteTarget: "/remote/target",
+      recursive: false, overwrite: false, executionMode: "parallel"
+    } });
+    expect(started).toMatchObject({ structuredContent: { operationId: "transfer-host-key", state: "running" } });
+    let result: Awaited<ReturnType<Client["callTool"]>> | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      result = await client.callTool({ name: "operation_get", arguments: { operationId: "transfer-host-key" } });
+      if ((result.structuredContent as { state?: string } | undefined)?.state === "failed") break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(result).toMatchObject({ structuredContent: {
+      state: "failed", error: { code: "HOST_KEY_CHANGED", details: { oldFingerprint, newFingerprint } }
+    } });
+    expect(JSON.stringify(result)).not.toContain("drop-me");
+  });
 
   it("严格工具面只公布两个单文件传输入口", async () => {
     const { client } = await connect({ execute: async () => { throw new Error("不应审批"); } }, () => undefined);

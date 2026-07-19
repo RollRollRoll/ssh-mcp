@@ -1,7 +1,7 @@
 import { Transform, type Readable, type Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { HostConfig } from "../config/schema.js";
-import { createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
+import { createMcpOperationError, extractHostKeyChangedDetails, type McpOperationError } from "../errors/error-contract.js";
 import { ErrorCodes, isErrorCode } from "../errors/error-codes.js";
 import type { PathPlatform } from "../paths/path-guard.js";
 import {
@@ -53,6 +53,14 @@ export interface PreparedTransfer {
 
 export interface TransferBackend {
   prepare(request: TransferRequest, signal: AbortSignal): Promise<PreparedTransfer>;
+}
+
+export interface TransferProgressEvent {
+  readonly operationId: string;
+  readonly host: string;
+  readonly transferredBytes: number;
+  readonly totalBytes?: number;
+  readonly completedItems: number;
 }
 
 export type TemporaryCleanupState = "not_needed" | "removed" | "failed" | "unknown";
@@ -134,10 +142,14 @@ export class TransferPreparationError extends Error {
 
 /** 单文件传输运行器：不重试、不缓存整文件，只维护真实字节进度。 */
 export class TransferService {
-  public constructor(private readonly manager: OperationManager, private readonly backend: TransferBackend) {}
+  public constructor(
+    private readonly manager: OperationManager,
+    private readonly backend: TransferBackend,
+    private readonly onProgress?: (event: TransferProgressEvent) => void
+  ) {}
 
   public start(request: TransferRequest, operationId?: string): OperationSnapshot {
-    const execution = new TransferExecution(this.manager, this.backend, request, operationId);
+    const execution = new TransferExecution(this.manager, this.backend, request, operationId, this.onProgress);
     return execution.start();
   }
 }
@@ -159,12 +171,13 @@ class TransferExecution implements OperationRunner {
     private readonly manager: OperationManager,
     private readonly backend: TransferBackend,
     private readonly request: TransferRequest,
-    private readonly existingOperationId?: string
+    private readonly existingOperationId?: string,
+    private readonly onProgress?: (event: TransferProgressEvent) => void
   ) {}
 
   public start(): OperationSnapshot {
     const snapshot = this.existingOperationId === undefined
-      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" })
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer", target: { hosts: [this.request.host.alias] } })
       : this.manager.attachRunner(this.existingOperationId, this, "transfer");
     this.operationId = snapshot.operationId;
     this.publishProgress();
@@ -277,7 +290,8 @@ class TransferExecution implements OperationRunner {
       }), this.result()));
       return;
     }
-    this.publishTerminal(() => this.manager.fail(this.operationId, this.error(code, "failed", "none"), this.result()));
+    this.publishTerminal(() => this.manager.fail(this.operationId,
+      this.error(code, "failed", "none", extractHostKeyChangedDetails(error)), this.result()));
   }
 
   private async cleanup(): Promise<boolean> {
@@ -308,6 +322,13 @@ class TransferExecution implements OperationRunner {
   private publishProgress(): void {
     try {
       this.manager.updateResult(this.operationId, this.result());
+      this.onProgress?.({
+        operationId: this.operationId,
+        host: this.request.host.alias,
+        transferredBytes: this.transferredBytes,
+        ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
+        completedItems: 0
+      });
     } catch (error: unknown) {
       if (!isUnavailableOperation(error)) throw error;
     }

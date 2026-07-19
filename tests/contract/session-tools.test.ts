@@ -10,6 +10,7 @@ import { OperationManager } from "../../src/operations/operation-manager.js";
 import { SessionManager } from "../../src/sessions/session-manager.js";
 import { createServer } from "../../src/server.js";
 import { ApprovalService } from "../../src/approval/approval-service.js";
+import { SshAdapterError } from "../../src/ssh/ssh-adapter.js";
 
 const host: HostConfig = {
   alias: "linux", environment: "test", platform: "linux", host: "127.0.0.1", port: 22, username: "tester",
@@ -37,6 +38,31 @@ class Clock {
 describe("session MCP 工具契约", () => {
   const closers: Array<() => Promise<void>> = [];
   afterEach(async () => { await Promise.all(closers.splice(0).map(async (close) => await close())); });
+
+  it("session_open 的 HOST_KEY_CHANGED 只向 MCP 透传旧新指纹", async () => {
+    const oldFingerprint = `SHA256:${Buffer.alloc(32, 3).toString("base64").replace(/=+$/, "")}`;
+    const newFingerprint = `SHA256:${Buffer.alloc(32, 4).toString("base64").replace(/=+$/, "")}`;
+    const registry = new HostRegistry([host]);
+    const server = createServer(registry, new OperationManager(), undefined, undefined, {
+      registry,
+      approval: { execute: async <T>(intent: OperationIntent, sideEffect: (value: OperationIntent) => T | Promise<T>) =>
+        ({ approved: true as const, intent, value: await sideEffect(intent) }) } as never,
+      sessions: new SessionManager(),
+      adapter: { connect: async () => { throw new SshAdapterError("HOST_KEY_CHANGED", {
+        oldFingerprint, newFingerprint, secret: "drop-me"
+      }); } }
+    });
+    const client = new Client({ name: "contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closers.push(async () => { await client.close(); await server.close(); });
+
+    const result = await client.callTool({ name: "session_open", arguments: { host: "linux", columns: 80, rows: 24 } });
+    expect(result).toMatchObject({ isError: true, structuredContent: {
+      error: { code: "HOST_KEY_CHANGED", details: { oldFingerprint, newFingerprint } }
+    } });
+    expect(JSON.stringify(result)).not.toContain("drop-me");
+  });
 
   it("严格拒绝动态字段、未知主机与非规范 base64，且不会审批或连接", async () => {
     let approvals = 0;

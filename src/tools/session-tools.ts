@@ -3,7 +3,7 @@ import { z } from "zod";
 import { type ApprovalExecution, type ApprovalExecutionContext, type ApprovalExecutionOptions, type ApprovalService } from "../approval/approval-service.js";
 import { createOperationIntent, type OperationIntent } from "../approval/operation-intent.js";
 import type { HostConfig } from "../config/schema.js";
-import { createMcpOperationError, ErrorCodes, type McpOperationError } from "../errors/error-contract.js";
+import { createMcpOperationError, ErrorCodes, extractHostKeyChangedDetails, type McpOperationError } from "../errors/error-contract.js";
 import { HostRegistry } from "../hosts/host-registry.js";
 import { OperationManagerError } from "../operations/operation-manager.js";
 import { SessionManager, SessionManagerError, type SessionClock, type SessionSnapshot } from "../sessions/session-manager.js";
@@ -254,7 +254,9 @@ function matchesExpectedIntent(approved: OperationIntent, expected: OperationInt
   return approved.kind === expected.kind && approved.digest === expected.digest && approved.canonicalJson === expected.canonicalJson;
 }
 function sessionOf(value: SessionSnapshot): SessionSnapshot { return { sessionId: value.sessionId, host: value.host, platform: value.platform, shell: value.shell, state: value.state, columns: value.columns, rows: value.rows }; }
-function simpleError(code: McpOperationError["code"]): McpOperationError { return createMcpOperationError({ code, message: code, finalState: "failed", retriable: false, sideEffects: "none" }); }
+function simpleError(code: McpOperationError["code"], details?: Readonly<Record<string, unknown>>): McpOperationError {
+  return createMcpOperationError({ code, message: code, finalState: "failed", retriable: false, sideEffects: "none", details });
+}
 function snapshotResult(session: SessionSnapshot) { const structuredContent = { session }; return { content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }], structuredContent }; }
 function openSnapshotResult(session: SessionSnapshot) {
   const structuredContent = { session: { ...sessionOf(session), state: "active" as const, cursor: 0 as const } };
@@ -281,7 +283,7 @@ function approvalFailureForSession(sessions: SessionManager, sessionId: string, 
 function caughtError(error: unknown) {
   if (error instanceof SessionManagerError) return errorResult(error.error, error.session);
   if (error instanceof OperationManagerError) return errorResult(error.error);
-  if (error instanceof SshAdapterError) return errorResult(simpleError(error.code));
+  if (error instanceof SshAdapterError) return errorResult(simpleError(error.code, extractHostKeyChangedDetails(error)));
   return errorResult(simpleError(ErrorCodes.INTERNAL_ERROR));
 }
 function caughtReadError(error: unknown) { return caughtError(error); }

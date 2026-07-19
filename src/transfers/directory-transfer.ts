@@ -1,5 +1,5 @@
 import { ErrorCodes, isErrorCode, type ErrorCode } from "../errors/error-codes.js";
-import { createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
+import { createMcpOperationError, extractHostKeyChangedDetails, type McpOperationError } from "../errors/error-contract.js";
 import {
   OperationManager,
   OperationManagerError,
@@ -7,7 +7,13 @@ import {
   type OperationSnapshot
 } from "../operations/operation-manager.js";
 import { validateRelativePath, type DirectoryWalkEntry } from "./directory-walker.js";
-import { runPreparedTransfer, TransferPreparationError, type PreparedTransfer, type TransferRequest } from "./file-transfer.js";
+import {
+  runPreparedTransfer,
+  TransferPreparationError,
+  type PreparedTransfer,
+  type TransferProgressEvent,
+  type TransferRequest
+} from "./file-transfer.js";
 
 export interface PreparedDirectoryTransfer {
   readonly entries: readonly DirectoryWalkEntry[];
@@ -65,11 +71,15 @@ export interface DirectoryTransferResult extends Readonly<Record<string, unknown
 
 /** 一个目录对应一个 Operation；目录内始终按稳定顺序逐项执行。 */
 export class DirectoryTransferService {
-  public constructor(private readonly manager: OperationManager, private readonly backend: DirectoryTransferBackend) {}
+  public constructor(
+    private readonly manager: OperationManager,
+    private readonly backend: DirectoryTransferBackend,
+    private readonly onProgress?: (event: TransferProgressEvent & { readonly totalItems: number }) => void
+  ) {}
 
   public start(request: TransferRequest, operationId?: string): OperationSnapshot {
     if (!request.recursive) throw new TypeError("目录服务只接受 recursive=true");
-    return new DirectoryTransferExecution(this.manager, this.backend, request, operationId).start();
+    return new DirectoryTransferExecution(this.manager, this.backend, request, operationId, this.onProgress).start();
   }
 }
 
@@ -99,12 +109,13 @@ class DirectoryTransferExecution implements OperationRunner {
     private readonly manager: OperationManager,
     private readonly backend: DirectoryTransferBackend,
     private readonly request: TransferRequest,
-    private readonly existingOperationId?: string
+    private readonly existingOperationId?: string,
+    private readonly onProgress?: (event: TransferProgressEvent & { readonly totalItems: number }) => void
   ) {}
 
   public start(): OperationSnapshot {
     const snapshot = this.existingOperationId === undefined
-      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer" })
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "transfer", target: { hosts: [this.request.host.alias] } })
       : this.manager.attachRunner(this.existingOperationId, this, "transfer");
     this.operationId = snapshot.operationId;
     this.publish();
@@ -199,7 +210,7 @@ class DirectoryTransferExecution implements OperationRunner {
         return await this.finishPartial(closeConfirmed);
       }
       if (!closeConfirmed) return this.finishUnknown(ErrorCodes.STATE_UNKNOWN);
-      this.manager.fail(this.operationId, this.error(errorCode(error), "failed", "none"), this.result());
+      this.manager.fail(this.operationId, this.error(errorCode(error), "failed", "none", extractHostKeyChangedDetails(error)), this.result());
     }
   }
 
@@ -354,7 +365,17 @@ class DirectoryTransferExecution implements OperationRunner {
   }
 
   private publish(): void {
-    try { this.manager.updateResult(this.operationId, this.result()); }
+    try {
+      this.manager.updateResult(this.operationId, this.result());
+      this.onProgress?.({
+        operationId: this.operationId,
+        host: this.request.host.alias,
+        transferredBytes: this.transferredBytes,
+        ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
+        completedItems: this.succeeded.length,
+        totalItems: this.totalItems
+      });
+    }
     catch (error: unknown) { if (!isUnavailable(error)) throw error; }
   }
 
@@ -373,10 +394,15 @@ class DirectoryTransferExecution implements OperationRunner {
     });
   }
 
-  private error(code: ErrorCode, finalState: McpOperationError["finalState"], sideEffects: McpOperationError["sideEffects"]): McpOperationError {
+  private error(
+    code: ErrorCode,
+    finalState: McpOperationError["finalState"],
+    sideEffects: McpOperationError["sideEffects"],
+    details?: Readonly<Record<string, unknown>>
+  ): McpOperationError {
     return createMcpOperationError({
       code, message: code, finalState, retriable: false, sideEffects,
-      operationId: this.operationId, host: this.request.host.alias
+      operationId: this.operationId, host: this.request.host.alias, details
     }, undefined, { allowedOperationIds: new Set([this.operationId]), allowedHosts: new Set([this.request.host.alias]) });
   }
 

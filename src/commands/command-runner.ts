@@ -1,4 +1,4 @@
-import { createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
+import { createMcpOperationError, extractHostKeyChangedDetails, type McpOperationError } from "../errors/error-contract.js";
 import { ErrorCodes, isErrorCode } from "../errors/error-codes.js";
 import type { HostConfig } from "../config/schema.js";
 import { OperationManager, type OperationRunner, type OperationSnapshot } from "../operations/operation-manager.js";
@@ -14,6 +14,8 @@ interface CommandChannel {
   on(event: "close", listener: (code: number | null | undefined, signal: string | null | undefined) => void): this;
   on(event: "exit", listener: (code: number | null | undefined, signal: string | null | undefined) => void): this;
 }
+
+export type CommandConnectionPreflight = (connection: SshConnection) => Promise<void>;
 
 type ExecutionPhase = "connect_pending" | "connection_ready" | "exec_submitted" | "channel_active";
 
@@ -34,8 +36,8 @@ export class CommandRunner {
     private readonly connectTimeoutMs = 15_000
   ) {}
 
-  public start(host: HostConfig, command: string, operationId?: string): OperationSnapshot {
-    const execution = new CommandExecution(this.adapter, this.manager, host, command, this.connectTimeoutMs, operationId);
+  public start(host: HostConfig, command: string, operationId?: string, preflight?: CommandConnectionPreflight): OperationSnapshot {
+    const execution = new CommandExecution(this.adapter, this.manager, host, command, this.connectTimeoutMs, operationId, preflight);
     return execution.start();
   }
 }
@@ -60,14 +62,16 @@ class CommandExecution implements OperationRunner {
     private readonly host: HostConfig,
     private readonly rawCommand: string,
     private readonly connectTimeoutMs: number,
-    private readonly existingOperationId?: string
+    private readonly existingOperationId?: string,
+    private readonly preflight?: CommandConnectionPreflight
   ) {}
 
   public start(): OperationSnapshot {
     const snapshot = this.existingOperationId === undefined
-      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "command" })
+      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "command", target: { hosts: [this.host.alias] } })
       : this.manager.attachRunner(this.existingOperationId, this, "command");
     this.operationId = snapshot.operationId;
+    this.manager.updateResult(this.operationId, this.result());
     queueMicrotask(() => { void this.run(); });
     return snapshot;
   }
@@ -103,11 +107,16 @@ class CommandExecution implements OperationRunner {
         connection.close();
         return;
       }
+      await this.preflight?.(connection);
+      if (this.stopping) {
+        connection.close();
+        return;
+      }
       this.phase = "exec_submitted";
       connection.exec(buildCommand(this.host, this.rawCommand), (error, channel) => {
         if (error !== undefined) {
           if (!this.stopping) {
-            this.manager.fail(this.operationId, this.error(this.errorCode(error), "failed", "none"), this.result());
+            this.manager.fail(this.operationId, this.error(this.errorCode(error), "failed", "none", extractHostKeyChangedDetails(error)), this.result());
           }
           connection.close();
           return;
@@ -119,7 +128,8 @@ class CommandExecution implements OperationRunner {
       });
     } catch (error: unknown) {
       if (this.stopping) return;
-      this.manager.fail(this.operationId, this.error(this.errorCode(error), "failed", "none"), this.result());
+      this.manager.fail(this.operationId, this.error(this.errorCode(error), "failed", "none", extractHostKeyChangedDetails(error)), this.result());
+      this.connection?.close();
     }
   }
 
@@ -201,7 +211,8 @@ class CommandExecution implements OperationRunner {
   private error(
     code: McpOperationError["code"],
     finalState: McpOperationError["finalState"],
-    sideEffects: McpOperationError["sideEffects"]
+    sideEffects: McpOperationError["sideEffects"],
+    details?: Readonly<Record<string, unknown>>
   ): McpOperationError {
     return createMcpOperationError({
       code,
@@ -210,7 +221,8 @@ class CommandExecution implements OperationRunner {
       retriable: false,
       sideEffects,
       operationId: this.operationId,
-      host: this.host.alias
+      host: this.host.alias,
+      details
     }, undefined, {
       allowedOperationIds: new Set([this.operationId]),
       allowedHosts: new Set([this.host.alias])

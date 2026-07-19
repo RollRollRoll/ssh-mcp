@@ -16,6 +16,7 @@ import { registerHostsListTool } from "./tools/hosts-list.js";
 import { registerOperationControlTools } from "./tools/operation-control.js";
 import { registerProfileRunTool, type ProfileRunDependencies } from "./tools/profile-run.js";
 import { PolicyEngine } from "./policy/policy-engine.js";
+import { ProfileRemotePathVerifier } from "./policy/profile-remote-path-verifier.js";
 import { SessionManager } from "./sessions/session-manager.js";
 import { registerSessionTools, type SessionToolDependencies } from "./tools/session-tools.js";
 import { registerFileTransferTools, type FileTransferToolDependencies } from "./tools/file-transfer-tools.js";
@@ -111,7 +112,13 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
         state: snapshot.state,
         errorCode: snapshot.error?.code
       });
-    }
+    },
+    onOutputTruncated: (event) => logger.warn(LogEvents.OUTPUT_TRUNCATED, {
+      operationId: event.operationId,
+      host: event.host,
+      state: "running",
+      details: { droppedBytes: event.droppedBytes, minCursor: event.minCursor }
+    })
   });
   const registry = new HostRegistry(config.hosts);
   const sessions = new SessionManager({
@@ -157,7 +164,7 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
     if (event.operationId !== undefined) knownOperationIds.add(event.operationId);
     logger.info(LogEvents.APPROVAL_RESULT, {
       operationId: event.operationId,
-      state: event.approved ? "completed" : "failed",
+      state: event.state,
       errorCode: event.errorCode,
       details: { digest: event.digest }
     });
@@ -170,10 +177,30 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
     runner,
     coordinator
   });
-  registerProfileRunTool(server, { registry, runner, coordinator, policy: new PolicyEngine(config.lowRiskProfiles) });
+  registerProfileRunTool(server, {
+    registry,
+    runner,
+    coordinator,
+    policy: new PolicyEngine(config.lowRiskProfiles),
+    pathVerifier: new ProfileRemotePathVerifier()
+  });
   registerSessionTools(server, { registry, approval, sessions, adapter });
-  const singleFileTransfer = new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots));
-  const directoryTransfer = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend(adapter, config.localRoots));
+  const transferProgress = (event: {
+    operationId: string; host: string; transferredBytes: number; totalBytes?: number;
+    completedItems: number; totalItems?: number;
+  }): void => logger.info(LogEvents.TRANSFER_PROGRESS, {
+    operationId: event.operationId,
+    host: event.host,
+    state: "running",
+    details: {
+      transferredBytes: event.transferredBytes,
+      ...(event.totalBytes === undefined ? {} : { totalBytes: event.totalBytes }),
+      completedItems: event.completedItems,
+      ...(event.totalItems === undefined ? {} : { totalItems: event.totalItems })
+    }
+  });
+  const singleFileTransfer = new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots), transferProgress);
+  const directoryTransfer = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend(adapter, config.localRoots), transferProgress);
   registerFileTransferTools(server, {
     registry,
     approval,

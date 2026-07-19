@@ -18,18 +18,43 @@ const host: HostConfig = {
 };
 
 describe("TransferService 单文件生命周期", () => {
+  it("生产后端的 openSftp callback 挂起时，超时会有界关闭连接且只关闭一次", async () => {
+    let closes = 0;
+    const manager = new OperationManager({
+      idFactory: () => "hung-open-sftp",
+      limits: { transferTimeoutMs: 5, cancelConfirmationTimeoutMs: 50 }
+    });
+    const service = new TransferService(manager, new SftpTransferBackend({
+      connect: async () => ({
+        exec: () => undefined,
+        openShell: () => undefined,
+        openSftp: () => undefined,
+        close: () => { closes += 1; }
+      })
+    }, ["/local"], { localPlatform: "posix" }));
+
+    const started = service.start({
+      direction: "download", host, source: "/safe/source", target: "/local/target", overwrite: false
+    });
+    await terminal(manager, started.operationId);
+
+    expect(manager.get(started.operationId)).toMatchObject({ state: "timed_out" });
+    expect(closes).toBe(1);
+  });
+
   it("按原始字节流传输并把真实进度写入 operation_get，校验后才提交", async () => {
     const target = new PassThrough();
     const received: Buffer[] = [];
     target.on("data", (chunk: Buffer) => received.push(Buffer.from(chunk)));
     let committed = 0;
     const manager = new OperationManager({ idFactory: () => "upload-1" });
+    const progress: unknown[] = [];
     const service = new TransferService(manager, backend({
       source: Readable.from([Buffer.from([0, 255, 13, 10]), Buffer.from("中文")]),
       target,
       totalBytes: 10,
       commit: async () => { committed += 1; }
-    }));
+    }), (event) => progress.push(event));
 
     const started = service.start({ direction: "upload", host, source: "/local/data.bin", target: "/safe/data.bin", overwrite: false });
     expect(started).toMatchObject({ operationId: "upload-1", state: "running" });
@@ -44,6 +69,10 @@ describe("TransferService 单文件生命周期", () => {
         transferredBytes: 10, totalBytes: 10, completedItems: 1, temporaryCleanup: "not_needed"
       }
     });
+    expect(progress).toEqual(expect.arrayContaining([
+      { operationId: "upload-1", host: "linux", transferredBytes: 0, totalBytes: 10, completedItems: 0 },
+      { operationId: "upload-1", host: "linux", transferredBytes: 10, totalBytes: 10, completedItems: 0 }
+    ]));
   });
 
   it("源大小与实际字节不一致时不提交并清理临时目标", async () => {

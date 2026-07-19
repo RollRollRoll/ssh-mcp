@@ -76,6 +76,7 @@ describe("hosts_list", () => {
   it("hosts_list 反映并发连接引用、最后关闭与失败连接的当前状态", async () => {
     const registry = new HostRegistry(config.hosts);
     let attempt = 0;
+    const states: string[] = [];
     const adapter = new ConnectionTrackingSshAdapter({
       connect: async (_host, timeoutMs) => {
         expect(timeoutMs).toBe(3210);
@@ -89,7 +90,7 @@ describe("hosts_list", () => {
           onClose: (listener) => { closeListener = listener; }
         };
       }
-    }, registry, 3210);
+    }, registry, 3210, (_host, state) => states.push(state));
     const { client } = await connect(registry);
     const host = registry.get("alpha")!;
     const first = await adapter.connect(host);
@@ -107,6 +108,7 @@ describe("hosts_list", () => {
     });
     await expect(adapter.connect(host)).rejects.toThrow("连接失败");
     expect(registry.list().find((entry) => entry.alias === "alpha")?.connectionState).toBe("disconnected");
+    expect(states).toEqual(["connected", "disconnected"]);
   });
 
   async function connect(registry: HostRegistry): Promise<{ client: Client }> {

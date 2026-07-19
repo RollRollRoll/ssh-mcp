@@ -94,9 +94,57 @@ describe("OutputBuffer", () => {
     // 二分定位加实际读取约为 n·log₂n，远小于旧实现的 1+…+n 历史帧扫描。
     expect(output.entryFrameInspectionCount()).toBeLessThan(30_000);
   });
+
+  it("超过容量的大量 1-byte frame 仍保持固定 frame 上界与摊销访问", () => {
+    const output = new OutputBuffer(20_000);
+    for (let index = 0; index < 100_000; index += 1) {
+      output.append(index % 2 === 0 ? "stdout" : "stderr", Buffer.from("x"));
+    }
+
+    const read = output.readEntries(0, 20_000);
+    expect(read.truncated).toBe(true);
+    expect(read.droppedBytes).toBe(read.minCursor);
+    expect(read.frames.length).toBeLessThanOrEqual(4_096);
+    expect(read.nextCursor).toBe(100_000);
+    expect(output.entryFrameInspectionCount()).toBeLessThan(4_200);
+  });
 });
 
 describe("OperationManager", () => {
+  it("快照保存不可变主机目标摘要，并只在状态转换时单调更新时间", () => {
+    const clock = new FakeClock();
+    const hosts = ["alpha"];
+    const manager = new OperationManager({ clock, idFactory: () => "target" });
+    manager.create({ initialState: "awaiting_approval", target: { hosts } });
+    hosts[0] = "tampered";
+
+    const awaiting = manager.get("target");
+    expect(awaiting).toMatchObject({
+      host: "alpha", target: { hosts: ["alpha"] }, lastStateChangeAt: 0
+    });
+    expect(Object.isFrozen(awaiting.target)).toBe(true);
+    clock.advance(7);
+    manager.updateResult("target", { progress: 1 });
+    expect(manager.get("target").lastStateChangeAt).toBe(0);
+    manager.start("target");
+    expect(manager.get("target")).toMatchObject({ state: "running", lastStateChangeAt: 7 });
+  });
+
+  it("真实输出淘汰只发布白名单所需的截断统计", () => {
+    const events: unknown[] = [];
+    const manager = new OperationManager({
+      idFactory: () => "truncated",
+      outputBufferBytes: 4,
+      onOutputTruncated: (event) => events.push(event)
+    });
+    manager.create({ initialState: "running", target: { hosts: ["alpha"] } });
+    manager.appendOutput("truncated", "stdout", Buffer.from("123456"));
+
+    expect(events).toEqual([{
+      operationId: "truncated", host: "alpha", droppedBytes: 2, minCursor: 2
+    }]);
+  });
+
   it("shutdown 幂等且有界，挂起运行器截止后只能收敛为 unknown 并拒绝新操作", async () => {
     const clock = new FakeClock();
     const runner = new FakeRunner();

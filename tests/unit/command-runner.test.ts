@@ -50,6 +50,26 @@ const host: HostConfig = {
 };
 
 describe("CommandRunner", () => {
+  it("连接级 Profile 路径预检失败时不提交 exec 并关闭连接", async () => {
+    let execCalls = 0;
+    let closes = 0;
+    const manager = new OperationManager({ idFactory: () => "profile-preflight" });
+    const runner = new CommandRunner({ connect: async () => ({
+      exec: () => { execCalls += 1; },
+      close: () => { closes += 1; }
+    }) }, manager);
+    runner.start(host, "cat /tmp/link", undefined, async () => {
+      throw codedError(ErrorCodes.POLICY_REQUIRES_APPROVAL);
+    });
+
+    await tick();
+    expect(manager.get("profile-preflight")).toMatchObject({
+      state: "failed", error: { code: "POLICY_REQUIRES_APPROVAL", sideEffects: "none" }
+    });
+    expect(execCalls).toBe(0);
+    expect(closes).toBe(1);
+  });
+
   it("立即返回 running，按原始字节追加输出，并将非零退出与 SSH 故障区分", async () => {
     const channel = new Channel();
     let command = "";
