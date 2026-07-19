@@ -10,6 +10,7 @@ import {
   type OperationRunner,
   type OperationSnapshot
 } from "../operations/operation-manager.js";
+import { TransferProgressReporter } from "./progress-reporter.js";
 
 export type TransferDirection = "upload" | "download";
 
@@ -61,6 +62,7 @@ export interface TransferProgressEvent {
   readonly transferredBytes: number;
   readonly totalBytes?: number;
   readonly completedItems: number;
+  readonly totalItems?: number;
 }
 
 export type TemporaryCleanupState = "not_needed" | "removed" | "failed" | "unknown";
@@ -166,14 +168,17 @@ class TransferExecution implements OperationRunner {
   private finalTargetCommit: FinalTargetCommitState = "not_committed";
   private closePromise: Promise<void> | undefined;
   private readonly abortController = new AbortController();
+  private readonly progressReporter: TransferProgressReporter<TransferProgressEvent>;
 
   public constructor(
     private readonly manager: OperationManager,
     private readonly backend: TransferBackend,
     private readonly request: TransferRequest,
     private readonly existingOperationId?: string,
-    private readonly onProgress?: (event: TransferProgressEvent) => void
-  ) {}
+    onProgress?: (event: TransferProgressEvent) => void
+  ) {
+    this.progressReporter = new TransferProgressReporter(onProgress);
+  }
 
   public start(): OperationSnapshot {
     const snapshot = this.existingOperationId === undefined
@@ -322,13 +327,7 @@ class TransferExecution implements OperationRunner {
   private publishProgress(): void {
     try {
       this.manager.updateResult(this.operationId, this.result());
-      this.onProgress?.({
-        operationId: this.operationId,
-        host: this.request.host.alias,
-        transferredBytes: this.transferredBytes,
-        ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
-        completedItems: 0
-      });
+      if (this.totalBytes !== undefined) this.progressReporter.update(this.progressEvent());
     } catch (error: unknown) {
       if (!isUnavailableOperation(error)) throw error;
     }
@@ -336,10 +335,21 @@ class TransferExecution implements OperationRunner {
 
   private publishTerminal(action: () => OperationSnapshot): void {
     try {
+      this.progressReporter.final(this.progressEvent(this.finalTargetCommit === "committed"));
       action();
     } catch (error: unknown) {
       if (!isUnavailableOperation(error)) throw error;
     }
+  }
+
+  private progressEvent(completed = false): TransferProgressEvent {
+    return Object.freeze({
+      operationId: this.operationId,
+      host: this.request.host.alias,
+      transferredBytes: this.transferredBytes,
+      ...(this.totalBytes === undefined ? {} : { totalBytes: this.totalBytes }),
+      completedItems: completed ? 1 : 0
+    });
   }
 
   /**

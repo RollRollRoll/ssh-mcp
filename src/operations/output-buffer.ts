@@ -80,16 +80,30 @@ export class OutputBuffer {
       throw new RangeError("输出游标超出安全整数范围");
     }
 
-    const copied = Buffer.from(data);
     const cursor = this.endCursor;
-    this.frames.push({ stream, cursor, data: copied, metadata });
-    this.endCursor += copied.length;
-    this.bytes += copied.length;
     const previousMinimumCursor = this.minimumCursor;
-    this.evictOverflow();
+    this.endCursor += data.length;
+    if (data.length > this.capacityBytes) {
+      const retainedOffset = data.length - this.capacityBytes;
+      this.frames.length = 0;
+      this.head = 0;
+      this.bytes = this.capacityBytes;
+      this.minimumCursor = cursor + retainedOffset;
+      this.frames.push({
+        stream,
+        cursor: cursor + retainedOffset,
+        data: copyExact(data.subarray(retainedOffset)),
+        metadata
+      });
+    } else {
+      const copied = copyExact(data);
+      this.frames.push({ stream, cursor, data: copied, metadata });
+      this.bytes += copied.length;
+      this.evictOverflow();
+    }
     return Object.freeze({
       cursor,
-      byteLength: copied.length,
+      byteLength: data.length,
       droppedBytes: this.minimumCursor - previousMinimumCursor,
       minCursor: this.minimumCursor
     });
@@ -186,7 +200,7 @@ export class OutputBuffer {
         this.frames[this.head] = {
           stream: oldest.stream,
           cursor: oldest.cursor + amount,
-          data: oldest.data.subarray(amount),
+          data: copyExact(oldest.data.subarray(amount)),
           metadata: oldest.metadata
         };
       }
@@ -199,6 +213,13 @@ export class OutputBuffer {
     this.frames.splice(0, this.head);
     this.head = 0;
   }
+}
+
+/** 存量帧使用独立且等长的 ArrayBuffer，避免池切片或 subarray 保留已淘汰的大块内存。 */
+function copyExact(data: Buffer): Buffer {
+  const copied = Buffer.allocUnsafeSlow(data.length);
+  data.copy(copied);
+  return copied;
 }
 
 /** 仅暴露协调器显式绑定的主机别名，其他内部元数据绝不进入 MCP 帧。 */

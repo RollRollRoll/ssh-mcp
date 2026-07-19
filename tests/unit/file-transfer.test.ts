@@ -75,6 +75,101 @@ describe("TransferService 单文件生命周期", () => {
     ]));
   });
 
+  it("大量 1-byte chunk 的进度 observer 按 operation 固定有界并保留最终摘要", async () => {
+    const ids = ["progress-one", "progress-two"];
+    const progress: Array<{ operationId: string; transferredBytes: number; completedItems: number }> = [];
+    const manager = new OperationManager({ idFactory: () => ids.shift()! });
+    const chunks = Array.from({ length: 10_000 }, () => Buffer.from("x"));
+    const service = new TransferService(manager, {
+      prepare: async () => backend({
+        source: Readable.from(chunks), target: new PassThrough(), totalBytes: chunks.length,
+        commit: async () => undefined
+      }).prepare({ direction: "upload", host, source: "unused", target: "unused", overwrite: false }, new AbortController().signal)
+    }, (event) => progress.push(event));
+
+    for (const suffix of ["one", "two"]) {
+      const started = service.start({
+        direction: "upload", host, source: `/local/${suffix}`, target: `/safe/${suffix}`, overwrite: false
+      });
+      await terminal(manager, started.operationId);
+    }
+
+    for (const operationId of ["progress-one", "progress-two"]) {
+      const own = progress.filter((event) => event.operationId === operationId);
+      expect(own.length).toBeLessThanOrEqual(4);
+      expect(own[0]).toMatchObject({ transferredBytes: 0, completedItems: 0 });
+      expect(own.at(-1)).toMatchObject({ transferredBytes: 10_000, completedItems: 1 });
+    }
+  });
+
+  it("生产 SFTP 在 atomicReplace 与临时目标 cleanup 挂起时，取消仍先尝试清理再 close-once", async () => {
+    const localRoot = await mkdtemp(join(await realpath(tmpdir()), "ssh-mcp-abort-commit-"));
+    const source = join(localRoot, "source.bin");
+    await writeFile(source, "done");
+    const events: string[] = [];
+    let commitStarted = false;
+    let sftpCloses = 0;
+    let connectionCloses = 0;
+    const missing = (): Error => Object.assign(new Error("missing"), { code: "ENOENT" });
+    const sftp: SftpTransferSession = {
+      lstat: async (target) => {
+        if (target === "/") return { kind: "directory", id: "root", size: 0 };
+        if (target === "/safe") return { kind: "directory", id: "safe", size: 0 };
+        if (target === "/safe/target.bin") return { kind: "file", id: "target", size: 4 };
+        throw missing();
+      },
+      realpath: async (target) => target,
+      createReadStream: () => { throw new Error("不应读取远端源"); },
+      createWriteStream: () => new PassThrough(),
+      supportsAtomicReplace: true,
+      supportsHardlink: true,
+      atomicReplace: async () => {
+        commitStarted = true;
+        events.push("commit");
+        return await new Promise<never>(() => undefined);
+      },
+      hardlink: async () => undefined,
+      unlink: async () => {
+        events.push("cleanup");
+        return await new Promise<never>(() => undefined);
+      },
+      close: () => { sftpCloses += 1; events.push("sftp-close"); }
+    };
+    const connection: SshConnection = {
+      exec: () => undefined,
+      openShell: () => undefined,
+      openSftp: (callback) => callback(undefined, sftp),
+      close: () => { connectionCloses += 1; events.push("connection-close"); }
+    };
+    const manager = new OperationManager({
+      idFactory: () => "hung-atomic-replace",
+      limits: { cancelConfirmationTimeoutMs: 100 }
+    });
+    const service = new TransferService(manager, new SftpTransferBackend(
+      { connect: async () => connection }, [localRoot], {
+        localPlatform: "posix", temporaryIdFactory: () => "fixed", cleanupTimeoutMs: 20
+      }
+    ));
+    const started = service.start({
+      direction: "upload", host, source, target: "/safe/target.bin", overwrite: true
+    });
+    await waitUntil(() => commitStarted);
+    manager.cancel(started.operationId);
+    manager.cancel(started.operationId);
+    await terminal(manager, started.operationId);
+    await waitUntil(() => sftpCloses === 1 && connectionCloses === 1);
+
+    expect(manager.get(started.operationId)).toMatchObject({
+      state: "unknown",
+      result: { finalTargetCommit: "unknown", temporaryCleanup: "unknown" }
+    });
+    expect(events.indexOf("cleanup")).toBeGreaterThan(events.indexOf("commit"));
+    expect(events.indexOf("sftp-close")).toBeGreaterThan(events.indexOf("cleanup"));
+    expect(events.indexOf("connection-close")).toBeGreaterThan(events.indexOf("cleanup"));
+    expect(sftpCloses).toBe(1);
+    expect(connectionCloses).toBe(1);
+  });
+
   it("源大小与实际字节不一致时不提交并清理临时目标", async () => {
     let committed = 0;
     let cleaned = 0;

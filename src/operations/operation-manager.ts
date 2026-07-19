@@ -42,6 +42,7 @@ const operationTimeoutKinds = new Set<OperationTimeoutKind>([
 const MAX_ACTIVE_OPERATIONS = 32;
 const MAX_OPERATION_RECORDS = 64;
 const MAX_EXPIRED_OPERATION_IDS = 64;
+export const MAX_OUTPUT_TRUNCATION_EVENTS_PER_OPERATION = 4;
 
 export interface OperationLimits {
   readonly connectTimeoutMs: number;
@@ -130,7 +131,16 @@ interface OperationRecord {
   timeoutTimer: unknown;
   cancellationTimer: unknown;
   retentionTimer: unknown;
+  outputTruncation: OutputTruncationSummary | undefined;
   readonly changeListeners: Set<() => void>;
+}
+
+interface OutputTruncationSummary {
+  pendingDroppedBytes: number;
+  totalDroppedBytes: number;
+  minCursor: number;
+  emittedEvents: number;
+  nextPeriodicAt: number;
 }
 
 /** 生命周期存储只负责协调运行器，不会自行启动、重试或重放任何远程操作。 */
@@ -200,6 +210,7 @@ export class OperationManager {
       timeoutTimer: undefined,
       cancellationTimer: undefined,
       retentionTimer: undefined,
+      outputTruncation: undefined,
       changeListeners: new Set()
     };
     this.records.set(id, record);
@@ -315,12 +326,7 @@ export class OperationManager {
     if (record.machine.state === "running") {
       const appended = record.output.append(stream, data, metadata);
       if (appended !== undefined && appended.droppedBytes > 0) {
-        this.onOutputTruncated?.({
-          operationId: record.id,
-          ...(record.target?.hosts.length === 1 ? { host: record.target.hosts[0] } : {}),
-          droppedBytes: appended.droppedBytes,
-          minCursor: appended.minCursor
-        });
+        this.recordOutputTruncation(record, appended.droppedBytes, appended.minCursor);
       }
       this.notifyChanged(record);
     }
@@ -405,6 +411,7 @@ export class OperationManager {
     if (isTerminalOperationState(record.machine.state)) {
       return this.snapshot(record);
     }
+    this.flushOutputTruncation(record, true);
     record.machine.transition(state);
     this.markStateChange(record);
     const cancelReason = record.cancelReason;
@@ -552,6 +559,46 @@ export class OperationManager {
 
   private notifyChanged(record: OperationRecord): void {
     for (const listener of record.changeListeners) listener();
+  }
+
+  private recordOutputTruncation(record: OperationRecord, droppedBytes: number, minCursor: number): void {
+    if (this.onOutputTruncated === undefined) return;
+    const summary = record.outputTruncation ??= {
+      pendingDroppedBytes: 0,
+      totalDroppedBytes: 0,
+      minCursor,
+      emittedEvents: 0,
+      nextPeriodicAt: 1
+    };
+    summary.pendingDroppedBytes += droppedBytes;
+    summary.totalDroppedBytes += droppedBytes;
+    summary.minCursor = minCursor;
+    if (summary.emittedEvents === 0
+      || (summary.emittedEvents < MAX_OUTPUT_TRUNCATION_EVENTS_PER_OPERATION - 1
+        && summary.totalDroppedBytes >= summary.nextPeriodicAt)) {
+      this.flushOutputTruncation(record, false);
+    }
+  }
+
+  private flushOutputTruncation(record: OperationRecord, terminal: boolean): void {
+    const summary = record.outputTruncation;
+    if (summary === undefined) return;
+    if (summary.pendingDroppedBytes > 0
+      && summary.emittedEvents < MAX_OUTPUT_TRUNCATION_EVENTS_PER_OPERATION) {
+      this.onOutputTruncated?.({
+        operationId: record.id,
+        ...(record.target?.hosts.length === 1 ? { host: record.target.hosts[0] } : {}),
+        droppedBytes: summary.pendingDroppedBytes,
+        minCursor: summary.minCursor
+      });
+      summary.pendingDroppedBytes = 0;
+      summary.emittedEvents += 1;
+      summary.nextPeriodicAt = Math.min(Number.MAX_SAFE_INTEGER, Math.max(
+        summary.totalDroppedBytes + 1,
+        summary.totalDroppedBytes * 2
+      ));
+    }
+    if (terminal) record.outputTruncation = undefined;
   }
 
   private clearTimer(timer: unknown): void {

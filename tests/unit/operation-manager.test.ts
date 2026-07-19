@@ -108,6 +108,29 @@ describe("OutputBuffer", () => {
     expect(read.nextCursor).toBe(100_000);
     expect(output.entryFrameInspectionCount()).toBeLessThan(4_200);
   });
+
+  it("32 MiB 单帧与反复超大单帧只保留容量内尾部，不持有已淘汰 backing store", () => {
+    const capacity = 4;
+    const output = new OutputBuffer(capacity);
+    const oversized = Buffer.alloc(32 * 1024 * 1024, 0x61);
+
+    for (let index = 0; index < 5; index += 1) {
+      oversized[oversized.length - 1] = 0x61 + index;
+      output.append(index % 2 === 0 ? "stdout" : "stderr", oversized);
+      const stores = storedBackingStores(output);
+      expect([...stores].reduce((sum, store) => sum + store.byteLength, 0)).toBeLessThanOrEqual(capacity);
+    }
+
+    const read = output.readEntries(0, capacity);
+    expect(read).toMatchObject({
+      minCursor: oversized.length * 5 - capacity,
+      nextCursor: oversized.length * 5,
+      droppedBytes: oversized.length * 5 - capacity,
+      truncated: true
+    });
+    expect(read.frames).toHaveLength(1);
+    expect(read.frames[0]).toMatchObject({ stream: "stdout", cursor: oversized.length * 5 - capacity });
+  });
 });
 
 describe("OperationManager", () => {
@@ -143,6 +166,32 @@ describe("OperationManager", () => {
     expect(events).toEqual([{
       operationId: "truncated", host: "alpha", droppedBytes: 2, minCursor: 2
     }]);
+  });
+
+  it("大量小块淘汰按 operation 使用固定事件预算，最终摘要完整且互不串扰", () => {
+    const ids = ["truncated-one", "truncated-two"];
+    const events: Array<{ operationId: string; droppedBytes: number; minCursor: number }> = [];
+    const manager = new OperationManager({
+      idFactory: () => ids.shift()!,
+      outputBufferBytes: 1,
+      onOutputTruncated: (event) => events.push(event)
+    });
+    manager.create({ initialState: "running" });
+    manager.create({ initialState: "running" });
+
+    for (let index = 0; index < 10_000; index += 1) {
+      manager.appendOutput("truncated-one", "stdout", Buffer.from("x"));
+      manager.appendOutput("truncated-two", "stderr", Buffer.from("y"));
+    }
+    manager.complete("truncated-one");
+    manager.complete("truncated-two");
+
+    for (const operationId of ["truncated-one", "truncated-two"]) {
+      const own = events.filter((event) => event.operationId === operationId);
+      expect(own.length).toBeLessThanOrEqual(4);
+      expect(own.at(-1)?.minCursor).toBe(9_999);
+      expect(own.reduce((sum, event) => sum + event.droppedBytes, 0)).toBe(9_999);
+    }
   });
 
   it("shutdown 幂等且有界，挂起运行器截止后只能收敛为 unknown 并拒绝新操作", async () => {
@@ -451,6 +500,14 @@ describe("OperationManager", () => {
     expectError(() => manager.get("bounded-65"), "OPERATION_EXPIRED");
   });
 });
+
+function storedBackingStores(output: OutputBuffer): ReadonlySet<ArrayBufferLike> {
+  const storage = output as unknown as {
+    readonly frames: ReadonlyArray<{ readonly data: Buffer }>;
+    readonly head: number;
+  };
+  return new Set(storage.frames.slice(storage.head).map((frame) => frame.data.buffer));
+}
 
 class FakeRunner implements OperationRunner {
   public cancelCalls = 0;

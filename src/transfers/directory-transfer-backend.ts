@@ -24,6 +24,7 @@ import { AbortableSftpConnection } from "./abortable-sftp.js";
 export interface SftpDirectoryTransferBackendOptions {
   readonly localPlatform?: PathPlatform;
   readonly temporaryIdFactory?: () => string;
+  readonly cleanupTimeoutMs?: number;
 }
 
 /** 获批后安全枚举目录；普通文件委托 Task 10 后端执行原子流式传输。 */
@@ -45,7 +46,9 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
     throwIfAborted(signal);
     const connection = await this.adapter.connect(request.host);
     const abortable = new AbortableSftpConnection(connection, signal,
-      () => new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED));
+      () => Object.assign(new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED), {
+        targetCreation: "unknown" as const
+      }));
     let sftp: SftpTransferSession | undefined;
     try {
       sftp = await abortable.openSftp();
@@ -72,7 +75,7 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
       const sourceAfterWalk = await sourcePort.inspect(sourceRoot);
       if (!sameStat(sourceIdentity, sourceAfterWalk)) throw new DirectoryTransferSetupError(ErrorCodes.PATH_DENIED);
       throwIfAborted(signal);
-      abortable.disarm();
+      abortable.handoff();
       return Object.freeze({
         entries,
         createTargetRoot: async () => {

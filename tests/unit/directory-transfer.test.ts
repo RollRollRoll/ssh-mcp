@@ -1,11 +1,11 @@
 import { PassThrough, Readable } from "node:stream";
 import { join } from "node:path";
-import { lstat, mkdtemp, realpath } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { HostConfig } from "../../src/config/schema.js";
 import { ErrorCodes } from "../../src/errors/error-codes.js";
-import { OperationManager } from "../../src/operations/operation-manager.js";
+import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
 import { executeBoundedProbe } from "../../src/ssh/bounded-probe.js";
 import { createSourceMountVerifier, SftpDirectoryTransferBackend, withFreshMountEvidence } from "../../src/transfers/directory-transfer-backend.js";
 import type { SftpTransferSession, SshConnection } from "../../src/ssh/ssh-adapter.js";
@@ -164,6 +164,72 @@ describe("DirectoryTransferService", () => {
     expect(connectionCloses).toBe(1);
   });
 
+  it("生产目录后端交接后的 lstat 或 mkdir 挂起时，超时仍有界 close-once", async () => {
+    for (const hungAt of ["lstat", "mkdir"] as const) {
+      const localRoot = await mkdtemp(join(await realpath(tmpdir()), `ssh-mcp-directory-${hungAt}-`));
+      const sourceRoot = join(localRoot, "source");
+      await mkdir(sourceRoot);
+      let targetChecks = 0;
+      let mkdirStarted = false;
+      let sftpCloses = 0;
+      let connectionCloses = 0;
+      const clock = new ManualClock();
+      const missing = (): Error => Object.assign(new Error("missing"), { code: "ENOENT" });
+      const sftp: SftpTransferSession = {
+        lstat: async (target) => {
+          if (target === "/") return { kind: "directory", id: "root", size: 0 };
+          if (target === "/safe") return { kind: "directory", id: "safe", size: 0 };
+          if (target === "/safe/target") {
+            targetChecks += 1;
+            if (hungAt === "lstat" && targetChecks >= 4) return await new Promise<never>(() => undefined);
+          }
+          throw missing();
+        },
+        realpath: async (target) => target,
+        createReadStream: () => new PassThrough(),
+        createWriteStream: () => new PassThrough(),
+        readdir: async () => [],
+        mkdir: async () => {
+          mkdirStarted = true;
+          return await new Promise<never>(() => undefined);
+        },
+        supportsAtomicReplace: false,
+        supportsHardlink: false,
+        atomicReplace: async () => undefined,
+        hardlink: async () => undefined,
+        unlink: async () => undefined,
+        close: () => { sftpCloses += 1; }
+      };
+      const manager = new OperationManager({
+        clock,
+        idFactory: () => `directory-hung-after-handoff-${hungAt}`,
+        limits: { transferTimeoutMs: 100, cancelConfirmationTimeoutMs: 100 }
+      });
+      const service = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend({
+        connect: async () => ({
+          exec: () => undefined,
+          openShell: () => undefined,
+          openSftp: (callback) => callback(undefined, sftp),
+          close: () => { connectionCloses += 1; }
+        })
+      }, [localRoot], { localPlatform: "posix" }));
+
+      const started = service.start({
+        direction: "upload", host, source: sourceRoot, target: "/safe/target", overwrite: false, recursive: true
+      });
+      await waitUntil(() => hungAt === "lstat" ? targetChecks >= 4 : mkdirStarted);
+      clock.advance(100);
+      await terminal(manager, started.operationId);
+      await waitUntil(() => sftpCloses === 1 && connectionCloses === 1);
+
+      expect(manager.get(started.operationId).state).toBe("unknown");
+      expect(targetChecks).toBeGreaterThanOrEqual(4);
+      expect(mkdirStarted).toBe(hungAt === "mkdir");
+      expect(sftpCloses).toBe(1);
+      expect(connectionCloses).toBe(1);
+    }
+  });
+
   it("目录先于子项创建，普通文件严格串行并发布累计进度和稳定逐项结果", async () => {
     const calls: string[] = [];
     const manager = new OperationManager({ idFactory: () => "directory-ok" });
@@ -186,6 +252,23 @@ describe("DirectoryTransferService", () => {
         succeeded: ["a/one.bin", "z.bin"], failed: [], notExecuted: []
       }
     });
+  });
+
+  it("目录单文件大量 1-byte chunk 的进度 observer 使用固定预算并保留终态", async () => {
+    const chunks = Array.from({ length: 10_000 }, () => Buffer.from("x"));
+    const calls: string[] = [];
+    const progress: Array<{ transferredBytes: number; completedItems: number }> = [];
+    const manager = new OperationManager({ idFactory: () => "directory-progress-budget" });
+    const service = new DirectoryTransferService(manager, backend(preparedDirectory(calls, files("a"), new Map([
+      ["a", transfer(Readable.from(chunks), { totalBytes: chunks.length })]
+    ]))), (event) => progress.push(event));
+
+    const started = service.start(request());
+    await terminal(manager, started.operationId);
+
+    expect(progress.length).toBeLessThanOrEqual(4);
+    expect(progress[0]).toMatchObject({ transferredBytes: 0, completedItems: 0 });
+    expect(progress.at(-1)).toMatchObject({ transferredBytes: 10_000, completedItems: 1 });
   });
 
   it("首个失败后停止，保留成功项并把剩余项归入 notExecuted，不回滚已完成项", async () => {
@@ -660,7 +743,7 @@ function preparedDirectory(calls: string[], entries: PreparedDirectoryTransfer["
     close: async () => { calls.push("close"); }
   };
 }
-function transfer(source: Buffer | PassThrough, overrides: Partial<PreparedTransfer> = {}): PreparedTransfer {
+function transfer(source: Buffer | Readable, overrides: Partial<PreparedTransfer> = {}): PreparedTransfer {
   const readable = Buffer.isBuffer(source) ? Readable.from([source]) : source;
   return {
     source: readable, target: new PassThrough(), totalBytes: Buffer.isBuffer(source) ? source.length : 100,
@@ -675,6 +758,31 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 5)); }
   throw new Error("测试等待超时");
+}
+
+class ManualClock implements MonotonicClock {
+  private nowMs = 0;
+  private sequence = 0;
+  private readonly timers = new Map<number, { readonly due: number; readonly callback: () => void }>();
+
+  public now(): number { return this.nowMs; }
+  public setTimeout(callback: () => void, delayMs: number): number {
+    const id = ++this.sequence;
+    this.timers.set(id, { due: this.nowMs + delayMs, callback });
+    return id;
+  }
+  public clearTimeout(timer: unknown): void { this.timers.delete(timer as number); }
+  public advance(delayMs: number): void {
+    this.nowMs += delayMs;
+    for (;;) {
+      const due = [...this.timers.entries()].filter(([, timer]) => timer.due <= this.nowMs);
+      if (due.length === 0) return;
+      for (const [id, timer] of due) {
+        this.timers.delete(id);
+        timer.callback();
+      }
+    }
+  }
 }
 
 class FakeProbeChannel {

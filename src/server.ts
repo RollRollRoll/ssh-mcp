@@ -199,8 +199,11 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
       ...(event.totalItems === undefined ? {} : { totalItems: event.totalItems })
     }
   });
-  const singleFileTransfer = new TransferService(manager, new SftpTransferBackend(adapter, config.localRoots), transferProgress);
-  const directoryTransfer = new DirectoryTransferService(manager, new SftpDirectoryTransferBackend(adapter, config.localRoots), transferProgress);
+  const cleanupTimeoutMs = Math.max(1, Math.floor(config.limits.cancelConfirmationTimeoutMs / 2));
+  const singleFileTransfer = new TransferService(manager,
+    new SftpTransferBackend(adapter, config.localRoots, { cleanupTimeoutMs }), transferProgress);
+  const directoryTransfer = new DirectoryTransferService(manager,
+    new SftpDirectoryTransferBackend(adapter, config.localRoots, { cleanupTimeoutMs }), transferProgress);
   registerFileTransferTools(server, {
     registry,
     approval,

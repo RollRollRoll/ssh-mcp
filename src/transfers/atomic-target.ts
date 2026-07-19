@@ -97,6 +97,7 @@ export class AtomicTarget {
     if (this.committed || !this.openAttempted) return true;
     await this.writer?.stop();
     try { await this.port.remove(this.temporaryPath); return true; } catch (error: unknown) {
+      if (hasUnknownCleanupOutcome(error)) throw error;
       return isNotFound(error);
     }
   }
@@ -107,4 +108,8 @@ function isTargetExists(error: unknown): boolean {
 }
 function isNotFound(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === 2 || error.code === "2");
+}
+
+function hasUnknownCleanupOutcome(error: unknown): boolean {
+  return error instanceof Error && "cleanupOutcome" in error && error.cleanupOutcome === "unknown";
 }

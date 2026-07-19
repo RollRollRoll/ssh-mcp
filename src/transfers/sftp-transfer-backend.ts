@@ -30,17 +30,25 @@ import { AbortableSftpConnection } from "./abortable-sftp.js";
 export interface SftpTransferBackendOptions {
   readonly localPlatform?: PathPlatform;
   readonly temporaryIdFactory?: () => string;
+  readonly cleanupTimeoutMs?: number;
 }
+
+const DEFAULT_SFTP_CLEANUP_TIMEOUT_MS = 5_000;
 
 /** 在获批后建立一次性 SSH/SFTP 连接，并为单个普通文件准备安全流。 */
 export class SftpTransferBackend implements TransferBackend {
   private readonly localPlatform: PathPlatform;
+  private readonly cleanupTimeoutMs: number;
   public constructor(
     private readonly adapter: Pick<SshAdapter, "connect">,
     private readonly localRoots: readonly string[],
     private readonly options: SftpTransferBackendOptions = {}
   ) {
     this.localPlatform = options.localPlatform ?? (process.platform === "win32" ? "win32" : "posix");
+    this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_SFTP_CLEANUP_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs <= 0) {
+      throw new RangeError("SFTP 清理预算必须是正安全整数");
+    }
   }
 
   public async prepare(request: TransferRequest, signal: AbortSignal): Promise<PreparedTransfer> {
@@ -52,16 +60,19 @@ export class SftpTransferBackend implements TransferBackend {
       throwIfAborted(signal);
       connection = await this.adapter.connect(request.host);
       abortable = new AbortableSftpConnection(connection, signal,
-        () => Object.assign(new Error("传输已取消"), { code: ErrorCodes.TRANSFER_FAILED }));
+        () => Object.assign(new Error("传输已取消"), {
+          code: ErrorCodes.TRANSFER_FAILED,
+          cleanupOutcome: "unknown" as const
+        }));
       resources.add(async () => await abortable!.close());
       throwIfAborted(signal);
       sftp = await abortable.openSftp();
       throwIfAborted(signal);
       const sourceMountVerifier = createActualConnectionMountVerifier(request, connection);
       const prepared = request.direction === "upload"
-        ? await this.prepareUpload(request, connection, sftp, signal, resources, sourceMountVerifier)
-        : await this.prepareDownload(request, connection, sftp, signal, resources, sourceMountVerifier);
-      abortable.disarm();
+        ? await this.prepareUpload(request, connection, sftp, signal, resources, sourceMountVerifier, abortable)
+        : await this.prepareDownload(request, connection, sftp, signal, resources, sourceMountVerifier, abortable);
+      abortable.handoff();
       return prepared;
     } catch (error: unknown) {
       let resourceCloseFailed = false;
@@ -83,7 +94,8 @@ export class SftpTransferBackend implements TransferBackend {
     sftp: SftpTransferSession,
     signal: AbortSignal,
     resources: ResourceClosers,
-    sourceMountVerifier: ((source: string) => Promise<void>) | undefined
+    sourceMountVerifier: ((source: string) => Promise<void>) | undefined,
+    abortable: AbortableSftpConnection
   ): Promise<PreparedTransfer> {
     // 先证明源是普通文件，再创建任何远端临时目标；recursive=false 遇到目录必须零目标副作用拒绝。
     const local = await new LocalPathGuard(this.localRoots, { platform: this.localPlatform }).verify(request.source);
@@ -110,7 +122,7 @@ export class SftpTransferBackend implements TransferBackend {
       throwIfAborted(signal);
       const source = file.createReadStream({ autoClose: false });
       throwIfAborted(signal);
-      return prepared(source, target, status.size!, atomic, resources);
+      return prepared(source, target, status.size!, atomic, resources, abortable, this.cleanupTimeoutMs);
     } catch (error: unknown) {
       try { target?.destroy(); } catch { /* 同步销毁失败由清理证据收口。 */ }
       if (atomic.temporaryMayExist) {
@@ -126,7 +138,8 @@ export class SftpTransferBackend implements TransferBackend {
     sftp: SftpTransferSession,
     signal: AbortSignal,
     resources: ResourceClosers,
-    sourceMountVerifier: ((source: string) => Promise<void>) | undefined
+    sourceMountVerifier: ((source: string) => Promise<void>) | undefined,
+    abortable: AbortableSftpConnection
   ): Promise<PreparedTransfer> {
     const remote = await this.remoteGuard(request, connection, sftp, request.source);
     throwIfAborted(signal);
@@ -161,7 +174,7 @@ export class SftpTransferBackend implements TransferBackend {
     try {
       target = await atomic.open();
       throwIfAborted(signal);
-      return prepared(source, target, sourceStatus.size, atomic, resources);
+      return prepared(source, target, sourceStatus.size, atomic, resources, abortable, this.cleanupTimeoutMs);
     } catch (error: unknown) {
       try { source.destroy(); } catch { /* 后续资源关闭仍会执行。 */ }
       if (atomic.temporaryMayExist) {
@@ -247,13 +260,15 @@ function prepared(
   target: Writable,
   totalBytes: number,
   atomic: AtomicTarget,
-  resources: ResourceClosers
+  resources: ResourceClosers,
+  abortable: AbortableSftpConnection,
+  cleanupTimeoutMs: number
 ): PreparedTransfer {
   return {
     source, target, totalBytes,
     seal: async () => await atomic.seal(),
     commit: async () => await atomic.commit(),
-    cleanup: async () => await atomic.cleanup(),
+    cleanup: async () => await abortable.cleanup(async () => await atomic.cleanup(), cleanupTimeoutMs),
     close: async () => {
       const errors: unknown[] = [];
       try { atomic.destroy(); } catch (error: unknown) { errors.push(error); }

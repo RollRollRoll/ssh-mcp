@@ -1,6 +1,6 @@
 import type { SftpTransferSession, SshConnection } from "../ssh/ssh-adapter.js";
 
-/** 将 prepare 阶段远端 Promise 与取消信号竞速，并保证 SFTP/连接各关闭一次。 */
+/** 将完整 Prepared 生命周期内的远端 Promise 与取消信号竞速，并保证资源只关闭一次。 */
 export class AbortableSftpConnection {
   private readonly abortPromise: Promise<never>;
   private rejectAbort!: (error: Error) => void;
@@ -8,7 +8,8 @@ export class AbortableSftpConnection {
   private connectionClosed = false;
   private sftpClosed = false;
   private aborted = false;
-  private armed = true;
+  private closeOnAbort = true;
+  private cleanupDepth = 0;
 
   public constructor(
     private readonly connection: SshConnection,
@@ -41,23 +42,42 @@ export class AbortableSftpConnection {
     this.closeConnection();
   }
 
-  /** PreparedTransfer 已交给执行器后，由执行器按“先清理临时目标、再关闭资源”的顺序接管取消。 */
-  public disarm(): void {
-    this.armed = false;
-    this.signal.removeEventListener("abort", this.onAbort);
+  /** 交接后仍中止挂起 Promise，但资源关闭顺序改由执行器负责。 */
+  public handoff(): void {
+    this.closeOnAbort = false;
+  }
+
+  /** cleanup 由执行器持有独立预算；其间不复用已拒绝的业务 abort。 */
+  public async cleanup<T>(work: () => Promise<T>, timeoutMs: number): Promise<T> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new RangeError("SFTP 清理预算必须是正安全整数");
+    let timer: NodeJS.Timeout | undefined;
+    this.cleanupDepth += 1;
+    try {
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error("SFTP 清理超时"), {
+          cleanupOutcome: "unknown" as const
+        })), timeoutMs);
+      });
+      return await Promise.race([work(), timeout]);
+    } finally {
+      this.cleanupDepth -= 1;
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private readonly onAbort = (): void => {
-    if (!this.armed || this.aborted) return;
+    if (this.aborted) return;
     this.aborted = true;
     const error = this.abortError();
-    this.closeSftp();
-    this.closeConnection();
+    if (this.closeOnAbort) {
+      this.closeSftp();
+      this.closeConnection();
+    }
     this.rejectAbort(error);
   };
 
   private async race<T>(work: Promise<T>): Promise<T> {
-    if (!this.armed) return await work;
+    if (this.cleanupDepth > 0) return await work;
     if (this.aborted || this.signal.aborted) throw this.abortError();
     return await Promise.race([work, this.abortPromise]);
   }
@@ -82,7 +102,7 @@ export class AbortableSftpConnection {
   }
 
   private throwIfAborted(): void {
-    if (this.armed && (this.aborted || this.signal.aborted)) throw this.abortError();
+    if (this.aborted || this.signal.aborted) throw this.abortError();
   }
 
   private closeSftp(): void {
