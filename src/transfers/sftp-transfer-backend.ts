@@ -118,6 +118,8 @@ export class SftpTransferBackend implements TransferBackend {
       new RemoteAtomicPort(sftp, remote), this.options.temporaryIdFactory);
     let target: Writable | undefined;
     try {
+      // atomic.open 首次可能创建远端临时目标；从此刻起连接只能由统一关闭器收口。
+      abortable.handoff();
       target = await atomic.open();
       throwIfAborted(signal);
       const source = file.createReadStream({ autoClose: false });
@@ -126,7 +128,8 @@ export class SftpTransferBackend implements TransferBackend {
     } catch (error: unknown) {
       try { target?.destroy(); } catch { /* 同步销毁失败由清理证据收口。 */ }
       if (atomic.temporaryMayExist) {
-        throw new TransferPreparationError(error, await cleanupPreparationTarget(atomic));
+        throw new TransferPreparationError(error,
+          await cleanupPreparationTarget(atomic, abortable, this.cleanupTimeoutMs));
       }
       throw error;
     }
@@ -172,6 +175,8 @@ export class SftpTransferBackend implements TransferBackend {
       new LocalAtomicPort(local), this.options.temporaryIdFactory);
     let target: Writable | undefined;
     try {
+      // openExclusive 首次可能创建本地临时目标；业务 abort 不得抢先断开远端资源。
+      abortable.handoff();
       target = await atomic.open();
       throwIfAborted(signal);
       return prepared(source, target, sourceStatus.size, atomic, resources, abortable, this.cleanupTimeoutMs);
@@ -179,7 +184,8 @@ export class SftpTransferBackend implements TransferBackend {
       try { source.destroy(); } catch { /* 后续资源关闭仍会执行。 */ }
       if (atomic.temporaryMayExist) {
         try { target?.destroy(); } catch { /* 清理结果决定终态。 */ }
-        throw new TransferPreparationError(error, await cleanupPreparationTarget(atomic));
+        throw new TransferPreparationError(error,
+          await cleanupPreparationTarget(atomic, abortable, this.cleanupTimeoutMs));
       }
       throw error;
     }
@@ -390,8 +396,16 @@ async function closeWithinBudget(close: () => void | Promise<void>, timeoutMs: n
   finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
-async function cleanupPreparationTarget(atomic: AtomicTarget): Promise<TemporaryCleanupState> {
-  try { return await atomic.cleanup() ? "removed" : "failed"; } catch { return "unknown"; }
+async function cleanupPreparationTarget(
+  atomic: AtomicTarget,
+  abortable: AbortableSftpConnection,
+  cleanupTimeoutMs: number
+): Promise<TemporaryCleanupState> {
+  try {
+    return await abortable.cleanup(async () => await atomic.cleanup(), cleanupTimeoutMs) ? "removed" : "failed";
+  } catch {
+    return "unknown";
+  }
 }
 
 async function writeAll(handle: FileHandle, data: Buffer): Promise<void> {

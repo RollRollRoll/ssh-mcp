@@ -31,7 +31,7 @@ export class AbortableSftpConnection {
       if (!this.aborted) return;
       try { sftp.close(); } catch { /* 迟到资源只做尽力关闭。 */ }
     }, () => undefined);
-    const sftp = await this.race(pending);
+    const sftp = await this.race(async () => await pending);
     this.sftp = sftp;
     return this.wrap(sftp);
   }
@@ -53,12 +53,15 @@ export class AbortableSftpConnection {
     let timer: NodeJS.Timeout | undefined;
     this.cleanupDepth += 1;
     try {
+      const cleanupWork = Promise.resolve().then(work);
+      // 预算耗尽后底层清理仍可能迟到拒绝；显式观察，不能形成 detached rejection。
+      void cleanupWork.catch(() => undefined);
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error("SFTP 清理超时"), {
           cleanupOutcome: "unknown" as const
         })), timeoutMs);
       });
-      return await Promise.race([work(), timeout]);
+      return await Promise.race([cleanupWork, timeout]);
     } finally {
       this.cleanupDepth -= 1;
       if (timer !== undefined) clearTimeout(timer);
@@ -76,27 +79,27 @@ export class AbortableSftpConnection {
     this.rejectAbort(error);
   };
 
-  private async race<T>(work: Promise<T>): Promise<T> {
-    if (this.cleanupDepth > 0) return await work;
+  private async race<T>(work: () => Promise<T>): Promise<T> {
+    if (this.cleanupDepth > 0) return await work();
     if (this.aborted || this.signal.aborted) throw this.abortError();
-    return await Promise.race([work, this.abortPromise]);
+    return await Promise.race([work(), this.abortPromise]);
   }
 
   private wrap(sftp: SftpTransferSession): SftpTransferSession {
-    const race = async <T>(work: Promise<T>): Promise<T> => await this.race(work);
+    const race = async <T>(work: () => Promise<T>): Promise<T> => await this.race(work);
     return {
-      lstat: async (path) => await race(sftp.lstat(path)),
-      realpath: async (path) => await race(sftp.realpath(path)),
+      lstat: async (path) => await race(async () => await sftp.lstat(path)),
+      realpath: async (path) => await race(async () => await sftp.realpath(path)),
       createReadStream: (path) => { this.throwIfAborted(); return sftp.createReadStream(path); },
-      ...(sftp.openReadFile === undefined ? {} : { openReadFile: async (path: string) => await race(sftp.openReadFile!(path)) }),
+      ...(sftp.openReadFile === undefined ? {} : { openReadFile: async (path: string) => await race(async () => await sftp.openReadFile!(path)) }),
       createWriteStream: (path) => { this.throwIfAborted(); return sftp.createWriteStream(path); },
-      ...(sftp.readdir === undefined ? {} : { readdir: async (path: string) => await race(sftp.readdir!(path)) }),
-      ...(sftp.mkdir === undefined ? {} : { mkdir: async (path: string) => await race(sftp.mkdir!(path)) }),
+      ...(sftp.readdir === undefined ? {} : { readdir: async (path: string) => await race(async () => await sftp.readdir!(path)) }),
+      ...(sftp.mkdir === undefined ? {} : { mkdir: async (path: string) => await race(async () => await sftp.mkdir!(path)) }),
       supportsAtomicReplace: sftp.supportsAtomicReplace,
       supportsHardlink: sftp.supportsHardlink,
-      atomicReplace: async (path, target) => await race(sftp.atomicReplace(path, target)),
-      hardlink: async (path, target) => await race(sftp.hardlink(path, target)),
-      unlink: async (path) => await race(sftp.unlink(path)),
+      atomicReplace: async (path, target) => await race(async () => await sftp.atomicReplace(path, target)),
+      hardlink: async (path, target) => await race(async () => await sftp.hardlink(path, target)),
+      unlink: async (path) => await race(async () => await sftp.unlink(path)),
       close: () => this.closeSftp()
     };
   }
