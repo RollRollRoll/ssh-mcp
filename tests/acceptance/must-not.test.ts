@@ -8,7 +8,7 @@ import { testWithIds } from "../test-with-ids.js";
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
 describe("禁止能力的产品入口验收", () => {
-  testWithIds(["MN-007"], "package 无业务 bin/HTTP/UI，唯一业务启动为 stdio 且参数只定位配置", () => {
+  testWithIds(["MN-007"], "package 无额外业务 bin/MCP HTTP transport，唯一业务启动仍为 stdio", () => {
     const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       readonly bin?: unknown;
       readonly main?: unknown;
@@ -28,7 +28,13 @@ describe("禁止能力的产品入口验收", () => {
       .toEqual([{ file: "index.ts", source: readFileSync(join(root, "src/index.ts"), "utf8") }]);
     const combined = sources.map(({ source }) => source).join("\n");
     expect(combined.match(/new StdioServerTransport\(/g)).toHaveLength(1);
-    expect(combined).not.toMatch(/StreamableHTTP|SSEServerTransport|WebSocketServer|node:https?|createServer\s*\(.*(?:http|request|response)/i);
+    expect(combined).not.toMatch(/StreamableHTTP|SSEServerTransport|WebSocketServer/i);
+    const nonConsoleSources = sources.filter(({ file }) => !file.startsWith("console/"))
+      .map(({ source }) => source).join("\n");
+    expect(nonConsoleSources).not.toMatch(/node:https?/i);
+    const consoleHttp = sources.find(({ file }) => file === "console/console-server.ts")?.source;
+    expect(consoleHttp).toContain('from "node:http"');
+    expect(consoleHttp).toContain('this.server.listen(0, "127.0.0.1")');
 
     const configured = join(root, "fixture.yml");
     expect(isAbsolute(configured)).toBe(true);

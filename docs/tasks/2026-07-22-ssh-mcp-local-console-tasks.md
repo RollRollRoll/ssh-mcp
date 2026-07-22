@@ -117,7 +117,7 @@
 - 验证方式：`npm test -- tests/contract/console-auth.test.ts tests/contract/console-server.test.ts && npm run typecheck`；同时启动两个测试服务做 Host/Cookie/token 交叉矩阵。
 - 覆盖：Design Decision 4、常规决策“HTTP/监听/Cookie/CSRF/页面安全”，`ConsoleAuthGuard` 与 `ConsoleServer` 骨架；Spec Requirement“本机访问保护”，MUST NOT“非回环监听”“仅凭本机授权”“登录/用户/角色”“跨实例聚合”。
 - 对现有的影响：新增的 HTTP 仅是实例私有控制台接口，不添加 MCP HTTP Transport 或通用业务 API。
-- [ ] 完成
+- [x] 完成
 
 ### Task 6：打通实例状态、操作输出与 SSE 自动同步页面
 
