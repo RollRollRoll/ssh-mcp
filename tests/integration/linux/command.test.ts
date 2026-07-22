@@ -15,6 +15,11 @@ import { TrustStore } from "../../../src/ssh/trust-store.js";
 import { ProfileCompiler } from "../../../src/policy/profile-compiler.js";
 import { PolicyEngine } from "../../../src/policy/policy-engine.js";
 import { ProfileRemotePathVerifier } from "../../../src/policy/profile-remote-path-verifier.js";
+import { ApprovalService } from "../../../src/approval/approval-service.js";
+import { CommandApplicationService } from "../../../src/application/command-application-service.js";
+import { ProfileApplicationService } from "../../../src/application/profile-application-service.js";
+import { OperationControlService } from "../../../src/console/operation-control-service.js";
+import { HostRegistry } from "../../../src/hosts/host-registry.js";
 
 const execute = promisify(execFile);
 const fixtureDirectory = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/openssh-linux");
@@ -48,6 +53,65 @@ afterAll(async () => {
 });
 
 describe("Linux OpenSSH command", () => {
+  it("IT-LINUX-CONSOLE-01：网页命令/Profile 复用首次 TOFU、输出与取消安全路径", async () => {
+    const manager = new OperationManager({
+      idFactory: sequence("web-command", "web-profile", "web-cancel"),
+      limits: { cancelConfirmationTimeoutMs: 5_000 }
+    });
+    let tofuConfirmations = 0;
+    const confirmation: TrustConfirmation = {
+      supportsForm: () => true,
+      confirm: async () => { tofuConfirmations += 1; return "accept"; }
+    };
+    const runner = new CommandRunner(new SshAdapter(new StrictHostKeyVerifier(
+      new TrustStore(join(workDirectory, `web-trust-${Date.now()}.json`)), confirmation
+    )), manager);
+    const registry = new HostRegistry([host()]);
+    const approval = new ApprovalService({
+      supportsFormElicitation: () => false,
+      elicit: async () => ({ action: "cancel" })
+    }, undefined, 10_000, manager);
+    const commands = new CommandApplicationService(registry, approval, runner);
+    const profiles = new ProfileApplicationService(registry, new PolicyEngine([{
+      id: "web-echo", hostAliases: ["linux"], platform: "linux", executable: "/usr/bin/printf",
+      fixedArgs: ["%s\\n"], parameters: [{ type: "enum", name: "value", required: true, values: ["网页-Profile"] }]
+    }]), runner, approval);
+    const control = new OperationControlService(approval.coordinator, manager);
+
+    try {
+      const command = commands.preview({ host: "linux", command: "printf '网页-命令\\n'" });
+      expect(approval.coordinator.decide(command.approvalId, "accept").status).toBe("resolved");
+      await expect(command.result).resolves.toMatchObject({ approved: true });
+      await terminal(manager, command.operationId!);
+      expect(manager.describeForConsole(command.operationId!)).toMatchObject({
+        state: "completed", source: "web", kind: "command"
+      });
+      expect(manager.get(command.operationId!).frames.map((frame) => frame.data).join(""))
+        .toContain("网页-命令");
+      expect(tofuConfirmations).toBe(1);
+
+      const profile = profiles.preview({ host: "linux", profileId: "web-echo", parameters: { value: "网页-Profile" } });
+      expect(approval.coordinator.decide(profile.approvalId, "accept").status).toBe("resolved");
+      await expect(profile.result).resolves.toMatchObject({ approved: true });
+      await terminal(manager, profile.operationId!);
+      expect(manager.get(profile.operationId!).frames.map((frame) => frame.data).join(""))
+        .toContain("网页-Profile");
+
+      const cancellation = commands.preview({
+        host: "linux", command: "printf cancel-ready; trap 'exit 0' TERM; while :; do :; done"
+      });
+      approval.coordinator.decide(cancellation.approvalId, "accept");
+      await cancellation.result;
+      await outputStarted(manager, cancellation.operationId!);
+      expect(control.cancel(cancellation.operationId!)).toMatchObject({ status: "cancel_requested" });
+      await terminal(manager, cancellation.operationId!);
+      expect(manager.get(cancellation.operationId!).state).toBe("cancelled");
+    } finally {
+      approval.shutdown();
+      await manager.shutdown(5_000);
+    }
+  });
+
   it("低风险 Profile 在 exec 前拒绝根内指向根外的真实 symlink", async () => {
     const target = `/tmp/ssh-mcp-profile-link-${process.pid}-${Date.now()}`;
     const manager = new OperationManager({ idFactory: sequence("create-link", "profile-link", "cleanup-link") });

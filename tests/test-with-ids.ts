@@ -1,6 +1,7 @@
 import { it } from "vitest";
 
-export type ExecutableTestId = `SC-${string}` | `MN-${string}` | "SAFE-APPROVAL-001";
+export type ExecutableTestId = `SC-${string}` | `MN-${string}` | `LC-SC-${string}` | `LC-MN-${string}`
+  | `LC-AC-${string}` | "SAFE-APPROVAL-001";
 type TestBody = () => unknown | Promise<unknown>;
 
 /**

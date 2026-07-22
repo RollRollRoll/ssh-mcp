@@ -24,6 +24,8 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [cancellingOperations, setCancellingOperations] = useState<ReadonlySet<string>>(new Set());
   const actionVersion = useRef(0);
+  const previewTrigger = useRef<HTMLElement | undefined>(undefined);
+  const restorePreviewFocus = useRef(false);
   const snapshot = state.snapshot;
   const selected = snapshot?.operations.find((item) => item.operationId === state.selectedOperationId);
   const selectedApproval = snapshot?.approvals.find((item) => item.approvalId === selectedApprovalId);
@@ -44,7 +46,14 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
       .catch(() => undefined);
     return () => { current = false; };
   }, [client, selected?.operationId, snapshot?.revision, state.connection, state.output?.nextCursor]);
-
+  useEffect(() => {
+    if (!restorePreviewFocus.current || preview !== undefined || actionBusy) return;
+    const frame = requestAnimationFrame(() => {
+      previewTrigger.current?.focus();
+      restorePreviewFocus.current = false;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [actionBusy, preview]);
   const activeOperations = snapshot?.operations.filter((item) => !terminalStates.has(item.state)).length ?? 0;
   const pendingApprovals = snapshot?.approvals.filter((item) => item.state === "pending").length ?? 0;
   const canWrite = writesEnabled(state) && client !== undefined;
@@ -61,7 +70,13 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
     setActionMessage(undefined);
   }, [client]);
 
-  const requestPreview = async (request: () => Promise<ConsolePreview>): Promise<void> => {
+  const requestPreview = async (
+    request: () => Promise<ConsolePreview>,
+    trigger: HTMLButtonElement | undefined
+  ): Promise<void> => {
+    restorePreviewFocus.current = false;
+    previewTrigger.current = trigger
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined);
     const version = ++actionVersion.current;
     const previous = preview;
     setPreview(undefined);
@@ -98,6 +113,7 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
       setPreview(undefined);
       setActionMessage(`决定失败：${error instanceof Error ? error.message : "INVALID_REQUEST"}`);
     } finally {
+      restorePreviewFocus.current = true;
       setActionBusy(false);
     }
   };
@@ -165,16 +181,16 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
             <article className="console-panel">
               <header><h2>单主机命令</h2><small>提交前必须核对冻结预览</small></header>
               <CommandForm hosts={snapshot.hosts} disabled={!canWrite} busy={actionBusy} onChange={invalidatePreview}
-                onPreview={(input) => {
-                  if (client !== undefined) void requestPreview(() => client.previewCommand(input));
+                onPreview={(input, trigger) => {
+                  if (client !== undefined) void requestPreview(() => client.previewCommand(input), trigger);
                 }} />
             </article>
             <article className="console-panel">
               <header><h2>低风险 Profile</h2><small>网页执行仍需明确确认</small></header>
               <ProfileForm hosts={snapshot.hosts} profiles={snapshot.profiles} disabled={!canWrite} busy={actionBusy}
                 onChange={invalidatePreview}
-                onPreview={(input) => {
-                  if (client !== undefined) void requestPreview(() => client.previewProfile(input));
+                onPreview={(input, trigger) => {
+                  if (client !== undefined) void requestPreview(() => client.previewProfile(input), trigger);
                 }} />
             </article>
           </section>
@@ -276,7 +292,7 @@ function StateBadge({ value }: { readonly value: string }) {
 
 function stateLabel(value: string): string {
   return ({
-    unknown: "未知", connecting: "连接中", connected: "已连接", disconnected: "已断开",
+    unknown: "状态未知", connecting: "连接中", connected: "已连接", disconnected: "已断开",
     awaiting_approval: "等待审批", pending: "等待审批", running: "运行中", completed: "已完成",
     accepted: "已接受", declined: "已拒绝", failed: "失败", timed_out: "已超时",
     cancelled: "已取消", partial_failure: "部分失败", cancel_requested: "已请求取消",

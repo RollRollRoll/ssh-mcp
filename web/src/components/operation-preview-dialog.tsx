@@ -10,7 +10,7 @@ export function OperationPreviewDialog({ preview, busy, onAccept, onCancel }: {
 }) {
   const dialog = useRef<HTMLElement>(null);
   const escape = useCallback(() => { if (!busy) onCancel(); }, [busy, onCancel]);
-  useDialogFocus(dialog, escape);
+  useDialogFocus(dialog, escape, !busy);
   const command = typeof preview.intent.payload.command === "string" ? preview.intent.payload.command : "";
   return (
     <div className="dialog-backdrop">

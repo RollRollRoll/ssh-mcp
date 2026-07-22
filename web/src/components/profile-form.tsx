@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ConsoleHost, ConsoleProfile, ConsoleProfileParameter } from "../console-types";
 
 export function ProfileForm({
@@ -13,7 +13,7 @@ export function ProfileForm({
     readonly host: string;
     readonly profileId: string;
     readonly parameters: Readonly<Record<string, string | number | boolean>>;
-  }) => void;
+  }, trigger: HTMLButtonElement | undefined) => void;
 }) {
   const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
   const profile = profiles.find((item) => item.id === profileId) ?? profiles[0];
@@ -21,6 +21,7 @@ export function ProfileForm({
     && profile.platform === host.platform), [hosts, profile]);
   const [host, setHost] = useState("");
   const [values, setValues] = useState<Record<string, string | number | boolean>>({});
+  const submit = useRef<HTMLButtonElement>(null);
   const selectedHost = availableHosts.some((item) => item.alias === host) ? host : (availableHosts[0]?.alias ?? "");
 
   const changeParameter = (parameter: ConsoleProfileParameter, value: string | boolean): void => {
@@ -40,7 +41,7 @@ export function ProfileForm({
         if (value !== undefined && value !== "") return [[parameter.name, value]];
         return parameter.type === "boolean" && parameter.required ? [[parameter.name, false]] : [];
       }));
-      onPreview({ host: selectedHost, profileId: profile?.id ?? "", parameters });
+      onPreview({ host: selectedHost, profileId: profile?.id ?? "", parameters }, submit.current ?? undefined);
     }}>
       <label>低风险 Profile
         <select value={profile?.id ?? ""} disabled={disabled || profiles.length === 0} onChange={(event) => {
@@ -59,7 +60,9 @@ export function ProfileForm({
         <ParameterField key={parameter.name} parameter={parameter} value={values[parameter.name]}
           disabled={disabled} onChange={(value) => changeParameter(parameter, value)} />
       ))}
-      <button type="submit" disabled={disabled || busy || profile === undefined || selectedHost.length === 0}>生成确认预览</button>
+      <button ref={submit} type="submit" disabled={disabled || busy || profile === undefined || selectedHost.length === 0}>
+        生成确认预览
+      </button>
     </form>
   );
 }

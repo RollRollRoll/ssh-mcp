@@ -16,6 +16,7 @@ import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
 import { PolicyEngine } from "../../src/policy/policy-engine.js";
 import type { ApprovalRoute } from "../../src/approval/approval-coordinator.js";
+import { testWithIds } from "../test-with-ids.js";
 
 const assets: StaticAssetProvider = Object.freeze({
   paths: Object.freeze(["/"]),
@@ -70,7 +71,8 @@ describe("控制台命令与 Profile 动作", () => {
     }
   });
 
-  it("命令预览逐字保留 Unicode 与 Shell 内容，摘要匹配后只执行一次", async () => {
+  testWithIds(["LC-SC-024", "LC-SC-025"],
+    "命令预览逐字保留 Unicode 与 Shell 内容，摘要匹配后只执行一次", async () => {
     const fixture = await startFixture();
     fixtures.push(fixture);
     const command = "printf '中文'\n$HOME; echo \"原样\"";
@@ -108,7 +110,7 @@ describe("控制台命令与 Profile 动作", () => {
     expect(fixture.executed).toHaveLength(1);
   });
 
-  it("严格拒绝额外字段、空命令、未知主机和不适用 Profile，且不会连接 SSH", async () => {
+  testWithIds(["LC-SC-023"], "严格拒绝额外字段、空命令、未知主机和不适用 Profile，且不会连接 SSH", async () => {
     const fixture = await startFixture();
     fixtures.push(fixture);
     const cases = [
@@ -158,7 +160,7 @@ describe("控制台命令与 Profile 动作", () => {
     expect(fixture.elicitationCalls()).toBe(0);
   });
 
-  it("取消和超时都释放冻结预览且副作用为零", async () => {
+  testWithIds(["LC-SC-022"], "取消和超时都释放冻结预览且副作用为零", async () => {
     const fixture = await startFixture();
     fixtures.push(fixture);
     const cancelled = JSON.parse((await post(fixture, "/api/v1/previews/command", {
@@ -180,7 +182,7 @@ describe("控制台命令与 Profile 动作", () => {
     expect(fixture.executed).toEqual([]);
   });
 
-  it("审批资源达到固定上限时返回 429 且不连接 SSH", async () => {
+  testWithIds(["LC-SC-047"], "审批资源达到固定上限时返回 429 且不连接 SSH", async () => {
     const fixture = await startFixture(1);
     fixtures.push(fixture);
     expect((await post(fixture, "/api/v1/previews/command", {

@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConsoleClient } from "../src/console-client";
 import { consoleReducer, initialConsoleState, writesEnabled } from "../src/console-state";
 import type { RuntimeSnapshot } from "../src/console-types";
+import { testWithIds } from "../../tests/test-with-ids.js";
 
 describe("控制台状态归约", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("用完整权威快照替换状态，并忽略迟到的旧修订", () => {
+  testWithIds(["LC-SC-041", "LC-SC-043"], "用完整权威快照替换状态，并忽略迟到的旧修订", () => {
     const current = consoleReducer(initialConsoleState, { type: "snapshot", snapshot: snapshot(4, "new") });
     const stale = consoleReducer(current, { type: "snapshot", snapshot: snapshot(3, "old") });
     expect(stale).toBe(current);
@@ -43,7 +44,7 @@ describe("控制台状态归约", () => {
     expect(state.output?.nextCursor).toBe(6);
   });
 
-  it("SSE ready/失效自动拉取权威快照，并合并并发刷新", async () => {
+  testWithIds(["LC-SC-040", "LC-AC-007"], "SSE ready/失效自动拉取权威快照，并合并并发刷新", async () => {
     const source = new FakeEventSource();
     vi.stubGlobal("EventSource", class { public constructor() { return source; } });
     let resolveSecond!: (response: Response) => void;

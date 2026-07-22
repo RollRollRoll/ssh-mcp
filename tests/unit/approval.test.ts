@@ -564,7 +564,8 @@ describe("ApprovalCoordinator", () => {
     })).not.toThrow();
   });
 
-  it("web-first 同步接受唯一生效，中止 MCP，其他标签页稳定返回 already_resolved", async () => {
+  testWithIds(["LC-SC-027"],
+    "web-first 同步接受唯一生效，中止 MCP，其他标签页稳定返回 already_resolved", async () => {
     const client = new FakeApprovalClient(true);
     const clock = new SharedFakeClock();
     const revisions: ApprovalSafeSnapshot[] = [];
@@ -606,7 +607,7 @@ describe("ApprovalCoordinator", () => {
     expect(revisions.at(-1)).toMatchObject({ state: "accepted", resolvedBy: "web" });
   });
 
-  it("MCP-first 发布已处理 revision，后到网页决定不能改变结果", async () => {
+  testWithIds(["LC-SC-028"], "MCP-first 发布已处理 revision，后到网页决定不能改变结果", async () => {
     const client = new FakeApprovalClient(true);
     const revisions: ApprovalSafeSnapshot[] = [];
     const coordinator = new ApprovalCoordinator({
@@ -674,7 +675,8 @@ describe("ApprovalCoordinator", () => {
     expect(sideEffects.calls).toBe(calls);
   });
 
-  it("web_only 不调用 MCP；dual 在客户端不支持 form 时仍于原期限等待网页", async () => {
+  testWithIds(["LC-SC-031", "LC-SC-032"],
+    "web_only 不调用 MCP；dual 在客户端不支持 form 时仍于原期限等待网页", async () => {
     const client = new FakeApprovalClient(false);
     const clock = new SharedFakeClock();
     let sequence = 0;

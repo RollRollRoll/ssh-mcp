@@ -1,19 +1,28 @@
 import { execFile as executeFile } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadStaticAssets } from "../../src/console/static-assets";
 
 const execFile = promisify(executeFile);
 const webRoot = process.cwd();
 const consoleRoot = resolve(webRoot, "../dist/console");
+const backendMarker = resolve(consoleRoot, "preserved-backend.js");
 
 describe("控制台静态构建", () => {
   beforeAll(async () => {
+    mkdirSync(consoleRoot, { recursive: true });
+    writeFileSync(backendMarker, "export {};\n");
     await execFile(process.execPath, ["node_modules/vite/bin/vite.js", "build"], {
       cwd: webRoot,
       env: { ...process.env, NODE_ENV: "production" },
     });
+  });
+  afterAll(() => rmSync(backendMarker, { force: true }));
+
+  it("前端重建只清理静态资源，不删除同目录的后端编译模块", () => {
+    expect(readFileSync(backendMarker, "utf8")).toBe("export {};\n");
   });
 
   it("生成可由本机静态资源提供器读取的同源哈希资源", async () => {

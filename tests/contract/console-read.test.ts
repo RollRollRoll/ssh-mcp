@@ -11,6 +11,7 @@ import type { StaticAssetProvider } from "../../src/console/static-assets.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
 import { SessionManager } from "../../src/sessions/session-manager.js";
+import { testWithIds } from "../test-with-ids.js";
 
 const assets: StaticAssetProvider = Object.freeze({
   paths: Object.freeze(["/"]),
@@ -54,7 +55,8 @@ describe("控制台只读接口", () => {
   const servers: ConsoleServer[] = [];
   afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
 
-  it("返回当前实例的安全权威快照，并强制同源会话", async () => {
+  testWithIds(["LC-SC-011", "LC-SC-012", "LC-SC-044"],
+    "返回当前实例的安全权威快照，并强制同源会话", async () => {
     const fixture = await startFixture();
     servers.push(fixture.server);
     fixture.hosts.connectionOpened("alpha");
@@ -90,7 +92,8 @@ describe("控制台只读接口", () => {
     })).status).toBe(403);
   });
 
-  it("按游标读取 stdout/stderr，报告截断，并区分无效、未知与过期操作", async () => {
+  testWithIds(["LC-SC-015", "LC-SC-016", "LC-SC-017"],
+    "按游标读取 stdout/stderr，报告截断，并区分无效、未知与过期操作", async () => {
     const clock = new Clock();
     const fixture = await startFixture(clock, 8);
     servers.push(fixture.server);

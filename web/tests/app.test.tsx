@@ -5,6 +5,7 @@ import App from "../src/App";
 import type { ConsoleClient } from "../src/console-client";
 import type { ConsoleAction } from "../src/console-state";
 import type { OperationCancelResponse, OperationOutput, RuntimeSnapshot } from "../src/console-types";
+import { testWithIds } from "../../tests/test-with-ids.js";
 
 describe("控制台真实快照界面", () => {
   let root: Root | undefined;
@@ -17,7 +18,8 @@ describe("控制台真实快照界面", () => {
     container = undefined;
   });
 
-  it("只渲染服务端快照，空状态明确且输出按纯文本显示", async () => {
+  testWithIds(["LC-SC-013", "LC-SC-014", "LC-SC-046", "LC-AC-008"],
+    "只渲染服务端快照，空状态明确且输出按纯文本显示", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     const client: ConsoleClient = {
       refresh: vi.fn(async () => undefined),
@@ -71,6 +73,37 @@ describe("控制台真实快照界面", () => {
     await act(async () => dispatch({ type: "disconnected" }));
     expect(container.querySelector("main")?.dataset.writeEnabled).toBe("false");
     expect(container.textContent).toContain("连接已断开（写操作已禁用）");
+  });
+
+  testWithIds(["LC-SC-049"], "在线、等待、运行、终态和断线均使用可读中文标签", async () => {
+    let dispatch!: React.Dispatch<ConsoleAction>;
+    ({ root, container } = render((nextDispatch) => {
+      dispatch = nextDispatch;
+      return {
+        refresh: async () => undefined,
+        loadOutput: async () => emptyOutput(),
+        previewCommand: async () => { throw new Error("未调用"); },
+        previewProfile: async () => { throw new Error("未调用"); },
+        decideApproval: async () => undefined,
+        cancelOperation: async () => ({ status: "terminal", operation: snapshot().operations[0]! }),
+        close: () => undefined
+      };
+    }));
+    const states = ["awaiting_approval", "running", "completed", "failed", "timed_out", "cancelled", "unknown"] as const;
+    await act(async () => dispatch({
+      type: "snapshot",
+      snapshot: {
+        ...snapshot(),
+        operations: states.map((state, index) => ({
+          ...snapshot().operations[0]!, operationId: `operation-${index}`, state
+        }))
+      }
+    }));
+    for (const label of ["实时在线", "等待审批", "运行中", "已完成", "失败", "已超时", "已取消", "状态未知"]) {
+      expect(container.textContent).toContain(label);
+    }
+    await act(async () => dispatch({ type: "disconnected" }));
+    expect(container.textContent).toContain("连接已断开");
   });
 });
 

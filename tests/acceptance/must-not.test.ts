@@ -58,13 +58,70 @@ describe("禁止能力的产品入口验收", () => {
     expect(adapter).not.toMatch(/\b(?:sock|forwardAgent|localAddress|localPort)\s*:/);
     expect(adapter).toContain("client.connect(config)");
   });
+
+  testWithIds(["LC-MN-001", "LC-MN-002", "LC-MN-004", "LC-MN-008", "LC-MN-009", "LC-MN-012"],
+    "控制台固定回环、逐实例鉴权、仅内存生命周期且不污染 stdio", () => {
+      const consoleServer = readFileSync(join(root, "src/console/console-server.ts"), "utf8");
+      const auth = readFileSync(join(root, "src/console/console-auth-guard.ts"), "utf8");
+      const bootstrap = readFileSync(join(root, "src/server.ts"), "utf8");
+      const entry = readFileSync(join(root, "src/index.ts"), "utf8");
+      const consoleSources = sourceFiles(join(root, "src/console"))
+        .filter(({ file }) => file !== "static-assets.ts").map(({ source }) => source).join("\n");
+      expect(consoleServer).toContain('this.server.listen(0, "127.0.0.1")');
+      expect(consoleServer).not.toMatch(/0\.0\.0\.0|::/);
+      expect(auth).toContain("timingSafeEqual");
+      expect(auth).toContain("instanceId");
+      expect(consoleSources).not.toMatch(/node:fs|node:sqlite|indexedDB|localStorage|sessionStorage/i);
+      expect(`${bootstrap}\n${entry}`).not.toMatch(/node:child_process/);
+      const packageJson = readFileSync(join(root, "package.json"), "utf8");
+      expect(packageJson).not.toMatch(/"(?:open|opn)"\s*:/i);
+      expect(consoleSources).not.toMatch(/process\.stdout|console\.log/);
+      expect(bootstrap).toContain("logger.consoleReady(consoleInfo.accessUrl)");
+    });
+
+  testWithIds(["LC-MN-003", "LC-MN-005", "LC-MN-006", "LC-MN-007", "LC-MN-010"],
+    "网页无登录、终端、文件、多主机、持久化、外部通知或危险渲染入口", () => {
+      const webSources = sourceFiles(join(root, "web/src")).map(({ source }) => source).join("\n");
+      const actions = readFileSync(join(root, "src/console/action-routes.ts"), "utf8");
+      expect(webSources).not.toMatch(/用户名|密码登录|角色管理|凭证签发/);
+      expect(webSources).not.toMatch(/type=["']file|dragover|ondrop|session_write|session_resize|session_open/i);
+      expect(webSources).not.toMatch(/file_upload|file_download|FormData|showOpenFilePicker/i);
+      expect(webSources).not.toMatch(/localStorage|sessionStorage|indexedDB|dangerouslySetInnerHTML/i);
+      expect(webSources).not.toMatch(/https?:\/\/|sendBeacon|Notification|WebSocket/i);
+      expect(actions.match(/host: boundedText/g)).toHaveLength(2);
+      expect(actions).not.toMatch(/hosts:\s*z\.array/);
+    });
+
+  testWithIds(["LC-MN-011"], "网页动作只调用共享应用服务，不直接连接 SSH 或复制执行规则", () => {
+    const actions = readFileSync(join(root, "src/console/action-routes.ts"), "utf8");
+    const server = readFileSync(join(root, "src/server.ts"), "utf8");
+    expect(actions).toContain("CommandApplicationService");
+    expect(actions).toContain("ProfileApplicationService");
+    expect(actions).not.toMatch(/ssh2|SshAdapter|\.connect\(/);
+    expect(server).toContain("new ConsoleActionRoutes(\n    commandApplication,\n    profileApplication");
+  });
+
+  testWithIds(["LC-AC-011"], "根检查统一覆盖后端、控制台构建、类型和行为测试", () => {
+    const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+      readonly scripts: Readonly<Record<string, string>>;
+      readonly files: readonly string[];
+      readonly workspaces: readonly string[];
+    };
+    expect(packageJson.files).toContain("dist");
+    expect(packageJson.workspaces).toContain("./web");
+    expect(packageJson.scripts.build).toContain("npm run build --workspace=web");
+    expect(packageJson.scripts.check).toContain("npm run build");
+    expect(packageJson.scripts.check).toContain("npm run typecheck");
+    expect(packageJson.scripts.check).toContain("tests/unit tests/contract tests/acceptance");
+    expect(packageJson.scripts.check).toContain("npm run test --workspace=web");
+  });
 });
 
 function sourceFiles(directory: string, base = directory): Array<{ readonly file: string; readonly source: string }> {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const absolute = join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(absolute, base);
-    if (!entry.name.endsWith(".ts")) return [];
+    if (!/\.tsx?$/.test(entry.name)) return [];
     return [{ file: absolute.slice(base.length + 1).replaceAll("\\", "/"), source: readFileSync(absolute, "utf8") }];
   });
 }

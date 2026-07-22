@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 import { testWithIds } from "../../test-with-ids.js";
 import { buildCommand } from "../../../src/commands/command-builder.js";
 import { CommandRunner } from "../../../src/commands/command-runner.js";
@@ -10,6 +11,11 @@ import { ProfileRemotePathVerifier } from "../../../src/policy/profile-remote-pa
 import { StrictHostKeyVerifier, type TrustConfirmation } from "../../../src/ssh/host-key.js";
 import { SshAdapter } from "../../../src/ssh/ssh-adapter.js";
 import { TrustStore } from "../../../src/ssh/trust-store.js";
+import { ApprovalService } from "../../../src/approval/approval-service.js";
+import { CommandApplicationService } from "../../../src/application/command-application-service.js";
+import { ProfileApplicationService } from "../../../src/application/profile-application-service.js";
+import { OperationControlService } from "../../../src/console/operation-control-service.js";
+import { HostRegistry } from "../../../src/hosts/host-registry.js";
 
 const windowsHost = {
   alias: "windows-fixture", environment: "test" as const, platform: "windows" as const,
@@ -19,6 +25,75 @@ const windowsHost = {
 };
 
 describe("Windows OpenSSH command", () => {
+  it.skipIf(!windowsIntegrationAvailable())(
+    "IT-WINDOWS-CONSOLE-01：网页命令/Profile 复用首次 TOFU、输出与取消安全路径",
+    async () => {
+      let operationSequence = 0;
+      const manager = new OperationManager({
+        idFactory: () => `windows-web-${++operationSequence}`,
+        limits: { cancelConfirmationTimeoutMs: 10_000 }
+      });
+      let tofuConfirmations = 0;
+      const confirmation: TrustConfirmation = {
+        supportsForm: () => true,
+        confirm: async () => { tofuConfirmations += 1; return "accept"; }
+      };
+      const host = windowsIntegrationHost();
+      const runner = new CommandRunner(new SshAdapter(new StrictHostKeyVerifier(
+        new TrustStore(join(requiredEnv("SSH_MCP_WINDOWS_LOCAL_ROOT"), `web-trust-${Date.now()}.json`)),
+        confirmation
+      )), manager);
+      const approval = new ApprovalService({
+        supportsFormElicitation: () => false,
+        elicit: async () => ({ action: "cancel" })
+      }, undefined, 20_000, manager);
+      const registry = new HostRegistry([host]);
+      const commands = new CommandApplicationService(registry, approval, runner);
+      const profiles = new ProfileApplicationService(registry, new PolicyEngine([{
+        id: "web-echo", hostAliases: [host.alias], platform: "windows", commandType: "cmdlet",
+        executable: "Write-Output", fixedArgs: [],
+        parameters: [{ type: "enum", name: "InputObject", required: true, values: ["网页-Profile"] }]
+      }]), runner, approval);
+      const control = new OperationControlService(approval.coordinator, manager);
+
+      try {
+        const command = commands.preview({ host: host.alias, command: "Write-Output '网页-命令'" });
+        expect(approval.coordinator.decide(command.approvalId, "accept").status).toBe("resolved");
+        await expect(command.result).resolves.toMatchObject({ approved: true });
+        await waitForTerminal(manager, command.operationId!);
+        expect(manager.describeForConsole(command.operationId!)).toMatchObject({
+          state: "completed", source: "web", kind: "command"
+        });
+        expect(manager.get(command.operationId!).frames.map((frame) => frame.data).join(""))
+          .toContain("网页-命令");
+        expect(tofuConfirmations).toBe(1);
+
+        const profile = profiles.preview({
+          host: host.alias, profileId: "web-echo", parameters: { InputObject: "网页-Profile" }
+        });
+        approval.coordinator.decide(profile.approvalId, "accept");
+        await profile.result;
+        await waitForTerminal(manager, profile.operationId!);
+        expect(manager.get(profile.operationId!).frames.map((frame) => frame.data).join(""))
+          .toContain("网页-Profile");
+
+        const cancellation = commands.preview({
+          host: host.alias,
+          command: "Write-Output 'cancel-ready'; [Console]::Out.Flush(); Start-Sleep -Seconds 120"
+        });
+        approval.coordinator.decide(cancellation.approvalId, "accept");
+        await cancellation.result;
+        await waitForOutput(manager, cancellation.operationId!, "cancel-ready");
+        expect(control.cancel(cancellation.operationId!)).toMatchObject({ status: "cancel_requested" });
+        await waitForTerminal(manager, cancellation.operationId!);
+        expect(manager.get(cancellation.operationId!).state).toBe("cancelled");
+      } finally {
+        approval.shutdown();
+        await manager.shutdown(10_000);
+      }
+    }
+  );
+
   it("固定 PowerShell UTF-16LE EncodedCommand，不使用 Linux Shell 包装", () => {
     const command = "Write-Output '中文'\r\nexit 0";
     const actual = buildCommand(windowsHost, command);

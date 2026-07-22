@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ConsoleAuthGuard, CONSOLE_SESSION_COOKIE } from "../../src/console/console-auth-guard.js";
 import { ConsoleServer, MAX_CONSOLE_BODY_BYTES } from "../../src/console/console-server.js";
 import type { StaticAssetProvider } from "../../src/console/static-assets.js";
+import { testWithIds } from "../test-with-ids.js";
 
 const assets: StaticAssetProvider = Object.freeze({
   paths: Object.freeze(["/", "/assets/app.js", "/assets/app.css"]),
@@ -21,7 +22,7 @@ describe("ConsoleServer", () => {
   const servers: ConsoleServer[] = [];
   afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
 
-  it("只监听 IPv4 回环随机端口，并只服务清单内静态资源与安全响应头", async () => {
+  testWithIds(["LC-SC-008"], "只监听 IPv4 回环随机端口，并只服务清单内静态资源与安全响应头", async () => {
     const { server, info } = await start("instancealpha1234", "a", "b");
     servers.push(server);
     expect(info.port).toBeGreaterThan(0);
@@ -48,7 +49,8 @@ describe("ConsoleServer", () => {
     expect((await send(info.port, { path: "/", host: `evil.localhost:${info.port}` })).status).toBe(403);
   });
 
-  it("token 只经严格同源 JSON 交换为 Cookie，受保护请求拒绝错误来源与跨实例凭证", async () => {
+  testWithIds(["LC-SC-006", "LC-SC-007", "LC-SC-009", "LC-AC-003"],
+    "token 只经严格同源 JSON 交换为 Cookie，受保护请求拒绝错误来源与跨实例凭证", async () => {
     const first = await start("instancealpha1234", "a", "b");
     const second = await start("instancebeta12345", "c", "d");
     servers.push(first.server, second.server);

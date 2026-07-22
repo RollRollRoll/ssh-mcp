@@ -1,6 +1,6 @@
 # SSH MCP
 
-SSH MCP 是一个仅通过 MCP `stdio` Transport 提供的 SSH 操作服务。它面向具备 `tools` 和 `form elicitation` 能力的 MCP 客户端；客户端先展示完整操作与摘要，再由用户一次性批准。
+SSH MCP 是一个通过 MCP `stdio` Transport 提供 SSH 操作的服务。每个 SSH MCP 进程还会同时启动一个与该进程同生命周期、仅本机访问的独立网页控制台；它不是 MCP HTTP Transport，也不需要单独启动前端服务。
 
 ## 运行条件与启动
 
@@ -18,9 +18,35 @@ node dist/index.js --config /absolute/path/to/ssh-mcp.yml
 
 也可以以绝对路径设置 `SSH_MCP_CONFIG`。启动参数只用于定位配置文件；它不是独立业务 CLI。标准输出只承载 MCP JSON-RPC 帧，诊断输出写入标准错误。
 
+配置和 MCP transport 就绪后，标准错误会输出一次结构化 `console.ready` 事件，其中 `accessUrl` 是本进程的完整控制台地址：
+
+```json
+{"level":"info","event":"console.ready","state":"active","accessUrl":"http://<随机实例>.localhost:<随机端口>/#access_token=<一次性令牌>"}
+```
+
+手动把完整地址复制到本机浏览器。服务不会自动打开浏览器。每个进程使用不同的随机回环端口、实例 Origin 和凭证；进程退出后旧地址失效。
+
+## 本机控制台
+
+控制台展示当前实例的服务状态、登记主机、操作与输出、审批，以及已有 Session/Transfer 的只读摘要。网页可以：
+
+- 对一台登记主机提交单次命令，或运行 YAML 中已定义的低风险 Profile；
+- 在完整冻结预览中核对目标、实际命令、影响、摘要和期限，再明确接受或取消；
+- 处理 MCP 来源的待审批操作；
+- 请求取消运行中的操作，并显示真实的最终状态；
+- 通过 SSE 自动同步本进程状态，连接中断时立即禁用写操作。
+
+网页不提供交互终端、Session 输入或尺寸修改、文件上传下载、多主机网页操作、跨实例发现、配置管理、历史审计或远程访问。
+
+### 访问凭证边界
+
+`accessUrl` 本身具有控制本进程的能力，应像临时秘密一样处理：只在本机可信浏览器中打开，不要共享、持久化或写入日志。页面会把 fragment 中的一次性令牌换成 host-only、HttpOnly、Secure、SameSite=Strict 会话 Cookie，并立即从地址栏清除 fragment；令牌不会进入 query、Web Storage 或页面持久状态。
+
+服务固定监听 `127.0.0.1` 的随机端口，且没有 YAML、环境变量或页面开关可改为局域网/远程监听。仅能连接本机并不等于已经授权；每个 API 请求仍需同时通过实例 Origin、会话和请求来源检查。
+
 ## 客户端能力基线
 
-客户端需要支持 MCP `2025-11-25`、stdio、工具调用和 form elicitation。`hosts_list` 可在没有审批表单的客户端中使用；任何需要副作用的工具在客户端不能呈现表单时返回 `APPROVAL_UNSUPPORTED`，不会连接 SSH 主机或读写文件。
+客户端需要支持 MCP `2025-11-25`、stdio 和工具调用；支持 form elicitation 时可直接在 MCP 客户端审批。`hosts_list` 不需要审批。对于 MCP 来源且需要审批的操作，如果客户端不能呈现表单，操作仍会在原审批期限内等待本机控制台决定；无人决定则保守超时，绝不会提前执行。网页来源操作只在网页审批，不会向 MCP 客户端制造无对应工具上下文的审批。
 
 服务固定提供 12 个工具：`hosts_list`、`command_run`、`profile_run`、`session_open`、`session_write`、`session_read`、`session_resize`、`session_close`、`file_upload`、`file_download`、`operation_get`、`operation_cancel`。长操作应使用后两个工具查询进度和请求取消。
 
@@ -41,6 +67,19 @@ npm run test:acceptance
 
 Windows 集成单独使用 `npm run test:integration:windows`，需要由受控 Windows OpenSSH Server 提供测试环境。
 
+### 浏览器验证范围
+
+本版本已在 **Codex 内置浏览器（Chromium 内核，2026-07-22 应用构建）** 实测 `*.localhost`、Secure 会话交换、fragment 清理、CSP 下静态加载、SSE 更新/断线禁写、纯文本渲染和键盘焦点流程。该浏览器未暴露可复现的内核版本号，因此不声明最低版本。
+
+Chrome/Edge、Firefox 和 Safari 尚未完成独立版本矩阵验证，本版本不声明它们的最低支持版本，也不会为兼容性增加 query token 或 Web Storage 降级。若目标浏览器不能完成会话交换或 SSE 连接，请更换已验证的本机浏览器，而不要放宽服务安全边界。
+
+### 故障判断
+
+- 标准错误没有 `console.ready`：控制台或 MCP transport 未完整启动；查看此前的结构化错误事件。
+- 页面显示“连接已断开（写操作已禁用）”：实例已退出或实时连接不可用；旧页面不会自动连接到新实例，请使用新进程输出的新地址。
+- 地址打不开：确认复制了完整 fragment 地址、进程仍在运行，并且浏览器支持 `*.localhost` 指向本机回环地址。
+- 页面能打开但不能写：不要手工改 Host、Origin、Cookie 或请求头；重新从最新 `console.ready` 地址建立会话。
+
 ## 非目标
 
-本版本不提供动态主机或凭据管理、生产主机、规则写入、多人权限或长期审计、独立 CLI/HTTP/UI、端口/代理/X11/认证代理转发、断点续传或元数据保留、自动重试/事务/回滚、跨重启恢复，以及 Linux 与 Windows 之间的命令、路径或规则翻译。
+本版本不提供动态主机或凭据管理、生产主机、规则写入、多人权限或长期审计、独立业务 CLI、MCP HTTP Transport、通用业务 API、远程管理 UI、端口/代理/X11/认证代理转发、断点续传或元数据保留、自动重试/事务/回滚、跨重启恢复，以及 Linux 与 Windows 之间的命令、路径或规则翻译。

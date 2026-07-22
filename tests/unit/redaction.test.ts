@@ -13,7 +13,7 @@ import {
 } from "../../src/observability/logger.js";
 
 describe("SecretRedactor", () => {
-  it("错误 details 默认关闭，仅保留白名单关联字段且在脱敏后深冻结", () => {
+  testWithIds(["LC-SC-045"], "错误 details 默认关闭，仅保留白名单关联字段且在脱敏后深冻结", () => {
     const redactor = new SecretRedactor({
       privateKeyPaths: ["/Users/dev/.ssh/id_ed25519"]
     });

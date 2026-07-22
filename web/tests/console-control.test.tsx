@@ -5,6 +5,7 @@ import App from "../src/App";
 import type { ConsoleClient } from "../src/console-client";
 import type { ConsoleAction } from "../src/console-state";
 import type { ConsoleOperation, OperationCancelResponse, RuntimeSnapshot } from "../src/console-types";
+import { testWithIds } from "../../tests/test-with-ids.js";
 
 describe("控制台审批、取消与键盘流程", () => {
   let root: Root | undefined;
@@ -17,7 +18,8 @@ describe("控制台审批、取消与键盘流程", () => {
     container = undefined;
   });
 
-  it("双通道审批显示完整纯文本，圈定焦点，Escape 取消并恢复触发按钮", async () => {
+  testWithIds(["LC-SC-048", "LC-SC-050", "LC-AC-010"],
+    "双通道审批显示完整纯文本，圈定焦点，Escape 取消并恢复触发按钮", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     const client = mockClient();
     ({ root, container } = render((next) => { dispatch = next; return client; }));
@@ -55,7 +57,8 @@ describe("控制台审批、取消与键盘流程", () => {
     expect(client.refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("操作取消立即显示已请求，重复点击禁用且最终服从权威快照", async () => {
+  testWithIds(["LC-SC-034", "LC-SC-036", "LC-AC-006"],
+    "操作取消立即显示已请求，重复点击禁用且最终服从权威快照", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     let resolveCancel!: (value: { status: "cancel_requested"; operation: ConsoleOperation }) => void;
     const cancelOperation = vi.fn(() => new Promise<{ status: "cancel_requested"; operation: ConsoleOperation }>(
@@ -80,7 +83,7 @@ describe("控制台审批、取消与键盘流程", () => {
     expect(Array.from(container.querySelectorAll("button")).some((item) => item.textContent?.includes("请求取消操作"))).toBe(false);
   });
 
-  it("断线时审批和操作取消入口全部禁用", async () => {
+  testWithIds(["LC-SC-042"], "断线时审批和操作取消入口全部禁用", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     const client = mockClient();
     ({ root, container } = render((next) => { dispatch = next; return client; }));

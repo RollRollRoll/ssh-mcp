@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonLogger } from "../../src/observability/logger.js";
 import { startServer, type ServerRuntime } from "../../src/server.js";
+import { testWithIds } from "../test-with-ids.js";
 
 const configPath = join(mkdtempSync(join(tmpdir(), "ssh-mcp-console-lifecycle-")), "config.yml");
 writeFileSync(configPath, `
@@ -42,7 +43,8 @@ describe("控制台实例生命周期", () => {
     }));
   });
 
-  it("两个真实实例的 Origin、Cookie、状态与审批完全隔离", async () => {
+  testWithIds(["LC-SC-001", "LC-SC-002", "LC-AC-001", "LC-AC-002"],
+    "两个真实实例的 Origin、Cookie、状态与审批完全隔离", async () => {
     const first = await startInstance();
     const second = await startInstance();
     instances.push(first, second);
@@ -70,7 +72,8 @@ describe("控制台实例生命周期", () => {
     expect((await snapshot(second)).approvals).toHaveLength(0);
   });
 
-  it("统一关闭先向 SSE 发送 offline，随后旧 URL 失效且其他实例继续可用", async () => {
+  testWithIds(["LC-SC-004", "LC-SC-010"],
+    "统一关闭先向 SSE 发送 offline，随后旧 URL 失效且其他实例继续可用", async () => {
     const first = await startInstance();
     const second = await startInstance();
     instances.push(first, second);

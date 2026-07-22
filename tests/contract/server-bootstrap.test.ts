@@ -12,6 +12,7 @@ import { createServer, resolveConfigPath, startServer } from "../../src/server.j
 import { JsonLogger } from "../../src/observability/logger.js";
 import type { ConsoleServerOptions } from "../../src/console/console-server.js";
 import type { StaticAssetProvider } from "../../src/console/static-assets.js";
+import { testWithIds } from "../test-with-ids.js";
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const children: ReturnType<typeof spawn>[] = [];
@@ -71,7 +72,7 @@ describe("MCP stdio 启动入口", () => {
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
   });
 
-  it("成功加载配置后完成初始化并注册基础工具，stdout 仅输出 MCP 帧", async () => {
+  testWithIds(["LC-AC-009"], "成功加载配置后完成初始化并注册基础工具，stdout 仅输出 MCP 帧", async () => {
     const child = spawn(process.execPath, ["dist/index.js"], {
       cwd: projectRoot,
       env: {
@@ -271,7 +272,8 @@ describe("MCP stdio 启动入口", () => {
     expect(logLines.join("\n")).not.toContain(wiringConfigPath);
   });
 
-  it("按资产、控制台 listener、MCP transport 顺序启动，运行期致命错误进入同一幂等关闭", async () => {
+  testWithIds(["LC-SC-005"],
+    "按资产、控制台 listener、MCP transport 顺序启动，运行期致命错误进入同一幂等关闭", async () => {
     const events: string[] = [];
     let consoleOptions: ConsoleServerOptions | undefined;
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -315,7 +317,8 @@ describe("MCP stdio 启动入口", () => {
     await clientTransport.close();
   });
 
-  it("控制台资产、listener 或 MCP transport 启动失败会反向清理且不报告完整启动", async () => {
+  testWithIds(["LC-SC-003"],
+    "控制台资产、listener 或 MCP transport 启动失败会反向清理且不报告完整启动", async () => {
     let factoryCalls = 0;
     let adapterShutdowns = 0;
     const logs: string[] = [];

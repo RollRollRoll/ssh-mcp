@@ -3,11 +3,13 @@ import { useEffect, useRef, type RefObject } from "react";
 /** 进入对话框、圈定 Tab，并在关闭后恢复触发元素。 */
 export function useDialogFocus(
   dialog: RefObject<HTMLElement | null>,
-  onEscape: () => void
+  onEscape: () => void,
+  active = true
 ): void {
   const escape = useRef(onEscape);
   escape.current = onEscape;
   useEffect(() => {
+    if (!active) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     const element = dialog.current;
     if (element === null) return;
@@ -37,5 +39,5 @@ export function useDialogFocus(
       element.removeEventListener("keydown", keydown);
       previous?.focus();
     };
-  }, [dialog]);
+  }, [active, dialog]);
 }

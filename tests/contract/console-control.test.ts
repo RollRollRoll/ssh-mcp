@@ -9,6 +9,7 @@ import type { HostConfig } from "../../src/config/schema.js";
 import { HostRegistry } from "../../src/hosts/host-registry.js";
 import { OperationManager, type MonotonicClock, type OperationRunner } from "../../src/operations/operation-manager.js";
 import { SessionManager } from "../../src/sessions/session-manager.js";
+import { testWithIds } from "../test-with-ids.js";
 
 class Clock implements MonotonicClock, ApprovalClock {
   public nowMs = 0;
@@ -24,7 +25,7 @@ class Clock implements MonotonicClock, ApprovalClock {
 }
 
 describe("控制台审批与取消", () => {
-  it("dual 审批向网页投影与 MCP 相同的完整安全意图", () => {
+  testWithIds(["LC-SC-026"], "dual 审批向网页投影与 MCP 相同的完整安全意图", () => {
     const fixture = createFixture();
     const intent = commandIntent("printf '<script>中文</script>'");
     fixture.approvals.request(intent, () => undefined, { route: "dual", operationId: "operation-1" });
@@ -44,7 +45,8 @@ describe("控制台审批与取消", () => {
     fixture.approvals.shutdown();
   });
 
-  it("网页、MCP 与多标签页并发决定只有一个赢家且副作用至多一次", async () => {
+  testWithIds(["LC-SC-029", "LC-SC-030", "LC-AC-005"],
+    "网页、MCP 与多标签页并发决定只有一个赢家且副作用至多一次", async () => {
     for (const webAction of ["accept", "decline", "cancel"] as const) {
       const fixture = createFixture();
       let sideEffects = 0;
@@ -72,7 +74,7 @@ describe("控制台审批与取消", () => {
     }
   });
 
-  it("拒绝错误摘要与未知审批，不改变待审批状态", () => {
+  testWithIds(["LC-SC-033"], "拒绝错误摘要与未知审批，不改变待审批状态", () => {
     const fixture = createFixture();
     let sideEffects = 0;
     const request = fixture.approvals.request(commandIntent("true"), () => { sideEffects += 1; }, { route: "dual" });
@@ -87,7 +89,8 @@ describe("控制台审批与取消", () => {
     fixture.approvals.shutdown();
   });
 
-  it("运行操作取消立即标记请求，重复请求幂等且最终状态服从真实停止结果", () => {
+  testWithIds(["LC-SC-038", "LC-SC-039"],
+    "运行操作取消立即标记请求，重复请求幂等且最终状态服从真实停止结果", () => {
     const fixture = createFixture();
     const runner: OperationRunner & { calls: number } = { calls: 0, cancel() { this.calls += 1; } };
     fixture.operations.create({ initialState: "running", runner, target: { hosts: ["linux"] } });

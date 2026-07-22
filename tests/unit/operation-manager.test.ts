@@ -288,7 +288,8 @@ describe("OperationManager", () => {
     expect(manager.fail("state").state).toBe("completed");
   });
 
-  it("取消运行项只请求一次；确认停止前保持 running，10 秒后变 unknown", async () => {
+  testWithIds(["LC-SC-018", "LC-SC-037"],
+    "取消运行项只请求一次；确认停止前保持 running，10 秒后变 unknown", async () => {
     const clock = new FakeClock();
     const runner = new FakeRunner();
     const manager = new OperationManager({ clock, idFactory: () => "running" });
@@ -305,7 +306,7 @@ describe("OperationManager", () => {
     });
   });
 
-  it("运行器明确确认停止后才进入 cancelled；尚未启动不调用运行器", () => {
+  testWithIds(["LC-SC-035"], "运行器明确确认停止后才进入 cancelled；尚未启动不调用运行器", () => {
     const runner = new FakeRunner();
     const ids = ["one", "two"];
     const manager = new OperationManager({ idFactory: () => ids.shift() ?? "extra" });

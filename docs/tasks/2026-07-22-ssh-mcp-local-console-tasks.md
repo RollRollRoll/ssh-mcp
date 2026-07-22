@@ -208,7 +208,7 @@
 - 验证方式：`npm ci && npm run check && npm run test:contract && npm run test:acceptance && npm run test:integration:linux`；Windows runner 执行 `npm run test:integration:windows`；按文档完成浏览器人工矩阵。
 - 覆盖：Design Decision 2、9，测试策略、风险与 Deferred；Spec 全部成功标准、全部 Requirement 和 MUST NOT 的最终回归。
 - 对现有的影响：更新旧“禁止网页”验收和使用说明，但不放宽本机控制台之外的任何既有安全边界。
-- [ ] 完成
+- [x] 完成
 
 ## 4. 拆分探针结论
 

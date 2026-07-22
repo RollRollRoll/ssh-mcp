@@ -5,6 +5,7 @@ import App from "../src/App";
 import { createConsoleClient, type ConsoleClient } from "../src/console-client";
 import type { ConsoleAction } from "../src/console-state";
 import type { ConsolePreview, OperationCancelResponse, RuntimeSnapshot } from "../src/console-types";
+import { testWithIds } from "../../tests/test-with-ids.js";
 
 describe("控制台操作表单", () => {
   let root: Root | undefined;
@@ -18,7 +19,7 @@ describe("控制台操作表单", () => {
     vi.unstubAllGlobals();
   });
 
-  it("命令先展示冻结原文与摘要，明确接受后才发送决定", async () => {
+  testWithIds(["LC-SC-019", "LC-AC-004"], "命令先展示冻结原文与摘要，明确接受后才发送决定", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     const client = mockClient({
       previewCommand: vi.fn(async () => preview("raw_command", "printf '中文'\n$HOME;"))
@@ -38,9 +39,10 @@ describe("控制台操作表单", () => {
     expect(client.decideApproval).toHaveBeenCalledWith("approval-1", "accept", "a".repeat(64));
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(container.textContent).toContain("操作已接受");
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toContain("生成确认预览"));
   });
 
-  it("影响字段变化取消旧预览，迟到响应也不会重新打开", async () => {
+  testWithIds(["LC-SC-021"], "影响字段变化取消旧预览，迟到响应也不会重新打开", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     let resolvePreview!: (value: ConsolePreview) => void;
     const previewCommand = vi.fn(() => new Promise<ConsolePreview>((resolve) => { resolvePreview = resolve; }));
@@ -63,7 +65,7 @@ describe("控制台操作表单", () => {
     expect(client.decideApproval).toHaveBeenLastCalledWith("approval-1", "cancel", "a".repeat(64));
   });
 
-  it("Profile 依据安全投影生成参数并预览服务端实际命令", async () => {
+  testWithIds(["LC-SC-020"], "Profile 依据安全投影生成参数并预览服务端实际命令", async () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     const client = mockClient({
       previewProfile: vi.fn(async () => preview("profile", "'/usr/bin/printf' '中文'"))
