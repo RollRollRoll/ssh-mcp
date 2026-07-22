@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "./web"
+  ],
   "engines": {
     "node": ">=24 <27"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build --workspace=web && tsc -p tsconfig.json",
     "pretest": "npm run build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace=web",
     "test": "vitest run",
-    "check": "npm run build && npm run typecheck && vitest run tests/unit tests/contract tests/acceptance",
+    "check": "npm run build && npm run typecheck && vitest run tests/unit tests/contract tests/acceptance && npm run test --workspace=web",
     "test:contract": "vitest run tests/contract",
     "test:acceptance": "vitest run tests/acceptance",
     "test:integration:linux": "node scripts/run-integration.mjs linux",

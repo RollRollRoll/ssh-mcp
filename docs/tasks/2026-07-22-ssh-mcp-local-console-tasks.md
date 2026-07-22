@@ -44,7 +44,7 @@
 - 验证方式：`npm ci && npm run build && npm run typecheck && npm run check`；检查 `dist/console/` 资源清单和前端构建测试。
 - 覆盖：Design Decision 2、9，常规决策“静态资源/前端状态”，迁移“前端与构建”；Spec 成功标准“统一自动化验证入口”。
 - 对现有的影响：替换演示站点构建链，但不改变 SSH MCP 运行行为；必须保留用户已有前端修改中仍符合规格的部分。
-- [ ] 完成
+- [x] 完成
 
 ### Task 2：实现统一审批协调器与首个决定唯一生效
 

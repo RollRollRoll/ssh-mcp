@@ -1,5 +1,3 @@
-@import "tailwindcss";
-
 :root {
   --ink: #111814;
   --ink-soft: #222d27;
@@ -11,6 +9,7 @@
   --mint-dark: #147756;
   --amber: #f5c65b;
   --danger: #dc704f;
+  --font-geist-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
