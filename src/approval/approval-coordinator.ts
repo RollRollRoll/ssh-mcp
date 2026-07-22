@@ -126,6 +126,7 @@ export class ApprovalCoordinator {
   private readonly onRevision?: (snapshot: ApprovalSafeSnapshot) => void;
   private readonly records = new Map<string, ApprovalRecord>();
   private readonly pending = new Map<string, PendingSecret>();
+  private readonly subscribers = new Set<() => void>();
   private shuttingDown = false;
 
   public constructor(options: ApprovalCoordinatorOptions) {
@@ -238,6 +239,12 @@ export class ApprovalCoordinator {
     return Object.freeze([...this.records.values()].map((record) => record.snapshot));
   }
 
+  public subscribe(listener: () => void): () => void {
+    if (this.shuttingDown) throw new Error("审批协调器已关闭");
+    this.subscribers.add(listener);
+    return () => { this.subscribers.delete(listener); };
+  }
+
   public shutdown(): void {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
@@ -249,6 +256,7 @@ export class ApprovalCoordinator {
     for (const record of this.records.values()) this.releaseRecordResources(record);
     this.pending.clear();
     this.records.clear();
+    this.subscribers.clear();
   }
 
   private accept(record: ApprovalRecord, source: "web" | "mcp"): ApprovalDecisionResult {
@@ -346,7 +354,7 @@ export class ApprovalCoordinator {
   private scheduleRetention(record: ApprovalRecord): void {
     if (this.shuttingDown || record.retentionTimer !== undefined) return;
     record.retentionTimer = this.clock.setTimeout(() => {
-      this.records.delete(record.snapshot.approvalId);
+      if (this.records.delete(record.snapshot.approvalId)) this.notifySubscribers();
     }, this.resultRetentionMs);
   }
 
@@ -373,6 +381,13 @@ export class ApprovalCoordinator {
       this.onRevision?.(snapshot);
     } catch {
       // 观察者不属于审批状态机，异常不得影响状态提交与敏感资源释放。
+    }
+    this.notifySubscribers();
+  }
+
+  private notifySubscribers(): void {
+    for (const listener of [...this.subscribers]) {
+      try { listener(); } catch { /* 控制台观察者不得影响审批仲裁。 */ }
     }
   }
 

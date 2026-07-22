@@ -115,6 +115,7 @@ export class SessionManager {
   private readonly closeConfirmationTimeoutMs: number;
   private readonly retentionMs: number;
   private readonly onStateChange: ((snapshot: SessionSnapshot) => void) | undefined;
+  private readonly subscribers = new Set<() => void>();
   private readonly shutdownWaiters = new Set<() => void>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -149,7 +150,20 @@ export class SessionManager {
     this.records.set(id, record);
     const snapshot = this.snapshot(record);
     this.onStateChange?.(snapshot);
+    this.publishChange();
     return snapshot;
+  }
+
+  /** 控制台只读取稳定排序的安全元数据，不包含 PTY 输出或写入口。 */
+  public list(): readonly SessionSnapshot[] {
+    return Object.freeze([...this.records.values()]
+      .map((record) => this.snapshot(record))
+      .sort((left, right) => left.sessionId < right.sessionId ? -1 : left.sessionId > right.sessionId ? 1 : 0));
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this.subscribers.add(listener);
+    return () => { this.subscribers.delete(listener); };
   }
 
   public activate(id: string, connection: SessionConnection, channel: SessionChannel): SessionSnapshot {
@@ -162,6 +176,7 @@ export class SessionManager {
     this.touch(record);
     const snapshot = this.snapshot(record);
     this.onStateChange?.(snapshot);
+    this.publishChange();
     return snapshot;
   }
 
@@ -170,6 +185,7 @@ export class SessionManager {
     const record = this.records.get(id);
     if (record?.state !== "opening") return;
     this.records.delete(id);
+    this.publishChange();
   }
 
   public get(id: string, cursor = 0, maxBytes = DEFAULT_OUTPUT_READ_BYTES): SessionGetResult {
@@ -224,6 +240,7 @@ export class SessionManager {
     record.columns = columns;
     record.rows = rows;
     this.touch(record);
+    this.publishChange();
     return this.snapshot(record);
   }
 
@@ -292,6 +309,7 @@ export class SessionManager {
     if (record.state !== "opening" && record.state !== "active") return;
     record.state = "closing";
     this.onStateChange?.(this.snapshot(record));
+    this.publishChange();
     this.terminatePendingWrites(record);
     this.clear(record.idleTimer);
     record.idleTimer = undefined;
@@ -329,6 +347,7 @@ export class SessionManager {
     this.releaseResources(record);
     record.retentionTimer = this.clock.setTimeout(() => this.expire(record.id), this.retentionMs);
     this.onStateChange?.(this.snapshot(record));
+    this.publishChange();
     for (const waiter of [...this.shutdownWaiters]) waiter();
   }
 
@@ -358,6 +377,13 @@ export class SessionManager {
     if (this.expired.size > MAX_EXPIRED_SESSION_IDS) {
       const oldest = this.expired.values().next().value;
       if (oldest !== undefined) this.expired.delete(oldest);
+    }
+    this.publishChange();
+  }
+
+  private publishChange(): void {
+    for (const listener of [...this.subscribers]) {
+      try { listener(); } catch { /* 控制台观察者不得影响会话生命周期。 */ }
     }
   }
 

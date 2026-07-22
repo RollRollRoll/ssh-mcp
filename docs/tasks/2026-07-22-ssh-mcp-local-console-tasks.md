@@ -99,7 +99,7 @@
 - 验证方式：`npm test -- tests/unit/operation-manager.test.ts tests/unit/session-manager.test.ts tests/unit/console-runtime.test.ts && npm run typecheck`。
 - 覆盖：Design Decision 8，`RuntimeRevisionHub`、`RuntimeSnapshotProjector`、`OperationControlService`、Operation/Session change hook；Spec Requirement“实例状态总览”“操作状态与输出”“网页取消操作”。
 - 对现有的影响：只增加内部观察接缝和安全投影，现有保留期、输出缓冲、资源预算和 MCP structuredContent 不变。
-- [ ] 完成
+- [x] 完成
 
 ### Task 5：交付本机访问保护、静态资源与受限 HTTP 服务骨架
 

@@ -72,6 +72,8 @@ export interface CreateOperationOptions {
   /** ApprovalService 自行持有 Elicitation 截止时间时，禁止登记第二个竞争计时器。 */
   readonly approvalTimeoutManagedExternally?: boolean;
   readonly target?: OperationTargetSummary;
+  readonly source?: ConsoleOperationSource;
+  readonly operationKind?: ConsoleOperationKind;
 }
 
 export interface OperationTargetSummary {
@@ -106,6 +108,33 @@ export interface OperationSnapshot {
 
 export interface OperationGetResult extends OperationSnapshot, OutputReadResult {}
 
+export type ConsoleOperationSource = "mcp" | "web";
+export type ConsoleOperationKind = "command" | "profile" | "session" | "transfer" | "multi_host" | "unknown";
+
+export interface ConsoleOperationProgress {
+  readonly stdoutBytes?: number;
+  readonly stderrBytes?: number;
+  readonly transferredBytes?: number;
+  readonly totalBytes?: number;
+  readonly aggregateTransferredBytes?: number;
+  readonly completedItems?: number;
+  readonly totalItems?: number;
+  readonly exitCode?: number;
+}
+
+/** 仅供本机控制台使用；不进入 MCP structuredContent。 */
+export interface ConsoleOperationSummary {
+  readonly operationId: string;
+  readonly source: ConsoleOperationSource;
+  readonly kind: ConsoleOperationKind;
+  readonly hosts: readonly string[];
+  readonly state: OperationState;
+  readonly cancelRequested: boolean;
+  readonly lastStateChangeAt: number;
+  readonly outputTruncated: boolean;
+  readonly progress: ConsoleOperationProgress;
+}
+
 export class OperationManagerError extends Error {
   public constructor(readonly error: McpOperationError) {
     super(error.message);
@@ -122,6 +151,8 @@ interface OperationRecord {
   readonly machine: OperationStateMachine;
   readonly output: OutputBuffer;
   readonly target: OperationTargetSummary | undefined;
+  readonly source: ConsoleOperationSource;
+  readonly operationKind: ConsoleOperationKind;
   lastStateChangeAt: number;
   runner: OperationRunner | undefined;
   cancelReason: "cancel" | "timeout" | undefined;
@@ -153,6 +184,7 @@ export class OperationManager {
   private readonly outputBufferBytes: number;
   private readonly onStateChange: ((snapshot: OperationSnapshot) => void) | undefined;
   private readonly onOutputTruncated: ((event: OutputTruncatedEvent) => void) | undefined;
+  private readonly subscribers = new Set<() => void>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
 
@@ -201,6 +233,8 @@ export class OperationManager {
       machine: new OperationStateMachine(initialState),
       output: new OutputBuffer(this.outputBufferBytes),
       target: freezeTarget(options.target),
+      source: options.source ?? "mcp",
+      operationKind: options.operationKind ?? operationKindFor(timeoutKind),
       lastStateChangeAt: this.clock.now(),
       runner: options.runner,
       cancelReason: undefined,
@@ -221,7 +255,25 @@ export class OperationManager {
     }
     const snapshot = this.snapshot(record);
     this.onStateChange?.(snapshot);
+    this.publishChange();
     return snapshot;
+  }
+
+  /** 控制台观察接缝只通知“事实已变化”，不复制输出或业务事件。 */
+  public subscribe(listener: () => void): () => void {
+    this.subscribers.add(listener);
+    return () => { this.subscribers.delete(listener); };
+  }
+
+  /** 控制台专用安全列表；稳定排序且不展开 result、Error 或输出内容。 */
+  public listForConsole(): readonly ConsoleOperationSummary[] {
+    return Object.freeze([...this.records.values()]
+      .map((record) => this.consoleSummary(record))
+      .sort(compareConsoleOperations));
+  }
+
+  public describeForConsole(id: string): ConsoleOperationSummary {
+    return this.consoleSummary(this.record(id));
   }
 
   /** 供父操作按已登记子操作数量计算总预算；不暴露或修改具体限制值。 */
@@ -250,6 +302,7 @@ export class OperationManager {
     this.scheduleOperationTimeout(record, effectiveTimeoutMs, effectiveTimeoutKind);
     const snapshot = this.snapshot(record);
     this.onStateChange?.(snapshot);
+    this.notifyChanged(record);
     return snapshot;
   }
 
@@ -451,6 +504,7 @@ export class OperationManager {
       this.finishRecord(record, reason === "timeout" ? "timed_out" : "cancelled");
       return;
     }
+    this.notifyChanged(record);
     const runner = record.runner;
     try {
       void Promise.resolve(runner.cancel(reason)).catch(() => undefined);
@@ -555,10 +609,18 @@ export class OperationManager {
       const oldest = this.expiredIds.values().next().value;
       if (oldest !== undefined) this.expiredIds.delete(oldest);
     }
+    this.publishChange();
   }
 
   private notifyChanged(record: OperationRecord): void {
     for (const listener of record.changeListeners) listener();
+    this.publishChange();
+  }
+
+  private publishChange(): void {
+    for (const listener of [...this.subscribers]) {
+      try { listener(); } catch { /* 控制台观察者不得影响权威状态。 */ }
+    }
   }
 
   private recordOutputTruncation(record: OperationRecord, droppedBytes: number, minCursor: number): void {
@@ -617,6 +679,20 @@ export class OperationManager {
     });
   }
 
+  private consoleSummary(record: OperationRecord): ConsoleOperationSummary {
+    return Object.freeze({
+      operationId: record.id,
+      source: record.source,
+      kind: record.operationKind,
+      hosts: Object.freeze([...(record.target?.hosts ?? [])]),
+      state: record.machine.state,
+      cancelRequested: record.cancelReason !== undefined,
+      lastStateChangeAt: record.lastStateChangeAt,
+      outputTruncated: record.output.readEntries(0, 1).truncated,
+      progress: projectProgress(record.result)
+    });
+  }
+
   private markStateChange(record: OperationRecord): void {
     const now = this.clock.now();
     record.lastStateChangeAt = Number.isFinite(now) ? Math.max(record.lastStateChangeAt, now) : record.lastStateChangeAt;
@@ -654,6 +730,38 @@ function freezeTarget(target: OperationTargetSummary | undefined): OperationTarg
     throw new RangeError("操作目标主机摘要无效");
   }
   return Object.freeze({ hosts: Object.freeze([...target.hosts]) });
+}
+
+function operationKindFor(timeoutKind: OperationTimeoutKind): ConsoleOperationKind {
+  switch (timeoutKind) {
+    case "command": return "command";
+    case "session": return "session";
+    case "transfer": return "transfer";
+    case "connect": return "unknown";
+    case "approval": return "unknown";
+  }
+}
+
+function projectProgress(result: Readonly<Record<string, unknown>> | undefined): ConsoleOperationProgress {
+  if (result === undefined) return Object.freeze({});
+  const progress: Record<string, number> = {};
+  for (const key of [
+    "stdoutBytes", "stderrBytes", "transferredBytes", "totalBytes",
+    "aggregateTransferredBytes", "completedItems", "totalItems", "exitCode"
+  ] as const) {
+    const value = result[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value)) continue;
+    if (key !== "exitCode" && value < 0) continue;
+    progress[key] = value;
+  }
+  return Object.freeze(progress);
+}
+
+function compareConsoleOperations(left: ConsoleOperationSummary, right: ConsoleOperationSummary): number {
+  if (left.lastStateChangeAt !== right.lastStateChangeAt) {
+    return right.lastStateChangeAt - left.lastStateChangeAt;
+  }
+  return left.operationId < right.operationId ? -1 : left.operationId > right.operationId ? 1 : 0;
 }
 
 const systemClock: MonotonicClock = {

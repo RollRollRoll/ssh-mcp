@@ -39,6 +39,32 @@ function reserve(manager: SessionManager, id = "s-1") {
 }
 
 describe("SessionManager", () => {
+  it("提供稳定排序的只读摘要与可释放变化钩子，不暴露输出帧", () => {
+    const ids = ["z-session", "a-session"];
+    const manager = new SessionManager({ idFactory: () => ids.shift()! });
+    let changes = 0;
+    const unsubscribe = manager.subscribe(() => { changes += 1; });
+    manager.subscribe(() => { throw new Error("观察者异常"); });
+    manager.reserve({ host: "z-host", platform: "linux", shell: "posix", columns: 80, rows: 24 });
+    manager.reserve({ host: "a-host", platform: "windows", shell: "powershell", columns: 100, rows: 30 });
+    expect(changes).toBe(2);
+
+    const list = manager.list();
+    expect(list.map((session) => session.sessionId)).toEqual(["a-session", "z-session"]);
+    expect(list[0]).toEqual({
+      sessionId: "a-session", host: "a-host", platform: "windows", shell: "powershell",
+      state: "opening", columns: 100, rows: 30
+    });
+    expect(JSON.stringify(list)).not.toContain("frames");
+    expect(Object.isFrozen(list)).toBe(true);
+
+    manager.abandonOpening("z-session");
+    expect(changes).toBe(3);
+    unsubscribe();
+    manager.abandonOpening("a-session");
+    expect(changes).toBe(3);
+  });
+
   it("shutdown 幂等关闭所有 PTY，截止后保守 unknown 并拒绝新会话", async () => {
     const clock = new Clock();
     const manager = new SessionManager({ clock, idFactory: () => "shutdown-session", closeConfirmationTimeoutMs: 100 });

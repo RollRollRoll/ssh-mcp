@@ -2,9 +2,14 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ErrorCodes, createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
 import {
   isVerifiedOperationIntent,
-  type OperationIntent
+  type OperationIntent,
+  type OperationIntentKind
 } from "./operation-intent.js";
-import { OperationManager, type OperationTimeoutKind } from "../operations/operation-manager.js";
+import {
+  OperationManager,
+  type ConsoleOperationKind,
+  type OperationTimeoutKind
+} from "../operations/operation-manager.js";
 import {
   ApprovalCoordinator,
   DEFAULT_APPROVAL_TIMEOUT_MS,
@@ -102,7 +107,9 @@ export class ApprovalService {
       initialState: "awaiting_approval",
       timeoutKind: "approval",
       approvalTimeoutManagedExternally: true,
-      target: { hosts: intent.hosts }
+      target: { hosts: intent.hosts },
+      source: options.route === "web_only" ? "web" : "mcp",
+      operationKind: consoleKindFor(intent.kind)
     });
     const operationId = awaiting?.operationId;
     let background = false;
@@ -176,4 +183,16 @@ function intentMismatchError(): { readonly approved: false; readonly error: McpO
 
 function withOperationId(error: McpOperationError, operationId: string): McpOperationError {
   return createMcpOperationError({ ...error, operationId }, undefined, { allowedOperationIds: new Set([operationId]) });
+}
+
+function consoleKindFor(kind: OperationIntentKind): ConsoleOperationKind {
+  switch (kind) {
+    case "raw_command": return "command";
+    case "profile": return "profile";
+    case "session_open":
+    case "session_input":
+    case "session_resize": return "session";
+    case "upload":
+    case "download": return "transfer";
+  }
 }

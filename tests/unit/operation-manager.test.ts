@@ -134,6 +134,74 @@ describe("OutputBuffer", () => {
 });
 
 describe("OperationManager", () => {
+  it("控制台列表稳定排序并只投影来源、类型、别名、截断和白名单进度", () => {
+    const clock = new FakeClock();
+    const ids = ["z-operation", "a-operation"];
+    const manager = new OperationManager({
+      clock,
+      idFactory: () => ids.shift()!,
+      outputBufferBytes: 2
+    });
+    manager.create({
+      initialState: "running",
+      source: "web",
+      operationKind: "transfer",
+      target: { hosts: ["alpha"] }
+    });
+    manager.updateResult("z-operation", {
+      transferredBytes: 3,
+      totalBytes: 8,
+      source: "/secret/local",
+      target: "/secret/remote",
+      arbitrary: { password: "不得投影" }
+    });
+    manager.appendOutput("z-operation", "stdout", Buffer.from("123"));
+    manager.create({ initialState: "running", target: { hosts: ["beta"] } });
+
+    const list = manager.listForConsole();
+    expect(list.map((operation) => operation.operationId)).toEqual(["a-operation", "z-operation"]);
+    expect(list[1]).toEqual({
+      operationId: "z-operation",
+      source: "web",
+      kind: "transfer",
+      hosts: ["alpha"],
+      state: "running",
+      cancelRequested: false,
+      lastStateChangeAt: 0,
+      outputTruncated: true,
+      progress: { transferredBytes: 3, totalBytes: 8 }
+    });
+    expect(JSON.stringify(list)).not.toContain("secret");
+    expect(Object.isFrozen(list)).toBe(true);
+    expect(Object.isFrozen(list[1].progress)).toBe(true);
+    expect(manager.get("z-operation")).not.toHaveProperty("source");
+    expect(manager.get("z-operation")).not.toHaveProperty("kind");
+    expect(manager.get("z-operation")).not.toHaveProperty("cancelRequested");
+  });
+
+  it("全局变化钩子可释放，取消请求立即可见且停止证据决定最终状态", () => {
+    const runner = new FakeRunner();
+    const manager = new OperationManager({ idFactory: () => "observed" });
+    let changes = 0;
+    const unsubscribe = manager.subscribe(() => { changes += 1; });
+    manager.subscribe(() => { throw new Error("观察者异常"); });
+    manager.create({ initialState: "running", runner });
+    expect(changes).toBe(1);
+
+    manager.cancel("observed");
+    expect(changes).toBe(2);
+    expect(manager.describeForConsole("observed")).toMatchObject({ state: "running", cancelRequested: true });
+    expect(runner.cancelCalls).toBe(1);
+
+    manager.cancel("observed");
+    expect(runner.cancelCalls).toBe(1);
+    manager.confirmStopped("observed");
+    expect(manager.describeForConsole("observed")).toMatchObject({ state: "cancelled", cancelRequested: false });
+    unsubscribe();
+    manager.appendOutput("observed", "stdout", Buffer.from("late"));
+    expect(changes).toBe(3);
+  });
+
   it("快照保存不可变主机目标摘要，并只在状态转换时单调更新时间", () => {
     const clock = new FakeClock();
     const hosts = ["alpha"];

@@ -12,6 +12,7 @@ export class HostRegistry {
   private readonly hostsByAlias: ReadonlyMap<string, HostConfig>;
   private readonly connectionStates = new Map<string, ConnectionState>();
   private readonly activeConnections = new Map<string, number>();
+  private readonly subscribers = new Set<() => void>();
 
   public constructor(hosts: readonly HostConfig[]) {
     const entries = hosts.map((host) => [host.alias, cloneAndFreeze(host)] as const);
@@ -38,7 +39,12 @@ export class HostRegistry {
     if (!this.hostsByAlias.has(alias)) {
       throw new Error(`未登记主机：${alias}`);
     }
-    this.connectionStates.set(alias, connectionState);
+    this.updateConnectionState(alias, connectionState);
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this.subscribers.add(listener);
+    return () => { this.subscribers.delete(listener); };
   }
 
   public connectionState(alias: string): ConnectionState {
@@ -50,7 +56,7 @@ export class HostRegistry {
   public connectionOpened(alias: string): void {
     this.assertRegistered(alias);
     this.activeConnections.set(alias, (this.activeConnections.get(alias) ?? 0) + 1);
-    this.connectionStates.set(alias, "connected");
+    this.updateConnectionState(alias, "connected");
   }
 
   public connectionClosed(alias: string): void {
@@ -58,17 +64,25 @@ export class HostRegistry {
     const remaining = Math.max(0, (this.activeConnections.get(alias) ?? 0) - 1);
     if (remaining === 0) {
       this.activeConnections.delete(alias);
-      this.connectionStates.set(alias, "disconnected");
+      this.updateConnectionState(alias, "disconnected");
     } else {
       this.activeConnections.set(alias, remaining);
-      this.connectionStates.set(alias, "connected");
+      this.updateConnectionState(alias, "connected");
     }
   }
 
   public connectionFailed(alias: string): void {
     this.assertRegistered(alias);
     if ((this.activeConnections.get(alias) ?? 0) === 0) {
-      this.connectionStates.set(alias, "disconnected");
+      this.updateConnectionState(alias, "disconnected");
+    }
+  }
+
+  private updateConnectionState(alias: string, state: ConnectionState): void {
+    if ((this.connectionStates.get(alias) ?? "unknown") === state) return;
+    this.connectionStates.set(alias, state);
+    for (const listener of [...this.subscribers]) {
+      try { listener(); } catch { /* 控制台观察者不得影响连接引用计数。 */ }
     }
   }
 
