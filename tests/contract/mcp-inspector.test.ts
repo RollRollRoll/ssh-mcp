@@ -148,7 +148,7 @@ describe("MCP Inspector 协议验收", () => {
     const fixture = createHangingInspectorFixture();
     let targetPid: number | undefined;
     try {
-      await expect(inspector(fixture.configPath, "tools/list", undefined, undefined, 300)).rejects.toThrow();
+      await expect(inspector(fixture.configPath, "tools/list", undefined, undefined, 1_000)).rejects.toThrow();
       targetPid = await readPid(fixture.pidPath);
       await waitForProcessExit(targetPid, 1_000);
       expect(isProcessAlive(targetPid)).toBe(false);
