@@ -21,7 +21,8 @@ export const LogEvents = {
   OPERATION_STATE_CHANGED: "operation.state_changed",
   OUTPUT_TRUNCATED: "output.truncated",
   TRANSFER_PROGRESS: "transfer.progress",
-  CLEANUP_RESULT: "cleanup.result"
+  CLEANUP_RESULT: "cleanup.result",
+  CONSOLE_READY: "console.ready"
 } as const;
 
 export type LogEvent = (typeof LogEvents)[keyof typeof LogEvents];
@@ -139,6 +140,20 @@ export class JsonLogger {
 
   public error(event: LogEvent, context: LogContext = {}): void {
     this.write("error", event, context);
+  }
+
+  /** 唯一允许完整能力 URL 的结构化诊断出口；普通 context/details 仍会删除该字段。 */
+  public consoleReady(accessUrl: string): void {
+    if (!/^http:\/\/[a-z0-9]{16,64}\.localhost:\d{1,5}\/#access_token=[A-Za-z0-9_-]{43,128}$/.test(accessUrl)) {
+      throw new Error("控制台访问 URL 格式无效");
+    }
+    this.sink.write(`${JSON.stringify({
+      timestamp: this.clock.now().toISOString(),
+      level: "info",
+      event: LogEvents.CONSOLE_READY,
+      state: "active",
+      accessUrl
+    })}\n`);
   }
 
   private write(level: LogLevel, event: LogEvent, context: LogContext): void {

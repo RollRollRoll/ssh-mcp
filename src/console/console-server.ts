@@ -24,7 +24,16 @@ export interface ConsoleServerOptions {
   readonly auth?: ConsoleAuthGuard;
   readonly readRoutes?: ConsoleReadRoutes;
   readonly actionRoutes?: ConsoleActionRoutes;
+  readonly onFatalError?: (error: Error) => void;
 }
+
+export interface ConsoleServerPort {
+  start(): Promise<ConsoleServerInfo>;
+  quiesce(): void;
+  close(): Promise<void>;
+}
+
+export type ConsoleServerFactory = (options: ConsoleServerOptions) => ConsoleServerPort;
 
 /** 严格白名单的本机 HTTP Origin；不提供 MCP transport 或通用工具调用接口。 */
 export class ConsoleServer {
@@ -32,6 +41,7 @@ export class ConsoleServer {
   private readonly server: Server;
   private readonly sockets = new Set<Socket>();
   private started = false;
+  private quiescing = false;
   private closePromise: Promise<void> | undefined;
 
   public constructor(private readonly options: ConsoleServerOptions) {
@@ -48,6 +58,9 @@ export class ConsoleServer {
     this.server.on("connection", (socket) => {
       this.sockets.add(socket);
       socket.once("close", () => this.sockets.delete(socket));
+    });
+    this.server.on("error", (error) => {
+      if (this.started && this.closePromise === undefined) this.options.onFatalError?.(error);
     });
   }
 
@@ -77,8 +90,8 @@ export class ConsoleServer {
 
   public close(): Promise<void> {
     this.closePromise ??= new Promise((resolve) => {
+      this.quiesce();
       this.auth.close();
-      this.options.readRoutes?.close();
       if (!this.server.listening) { resolve(); return; }
       const forceTimer = setTimeout(() => {
         for (const socket of this.sockets) socket.destroy();
@@ -91,6 +104,12 @@ export class ConsoleServer {
       this.server.closeIdleConnections();
     });
     return this.closePromise;
+  }
+
+  public quiesce(): void {
+    if (this.quiescing) return;
+    this.quiescing = true;
+    this.options.readRoutes?.close();
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -126,6 +145,9 @@ export class ConsoleServer {
         else if (isAction) this.auth.validateWrite(request);
         else this.auth.validateBase(request, true);
         this.auth.validateSession(request);
+        if (this.quiescing && (isAction || path === "/api/v1/events")) {
+          throw new ConsoleHttpError(503, "SERVICE_UNAVAILABLE");
+        }
         if (this.options.readRoutes?.handle(request, response) === true) return;
         if (isAction) {
           const result = this.options.actionRoutes!.handle(path, await readJsonBody(request));

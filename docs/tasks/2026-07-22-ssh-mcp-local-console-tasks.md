@@ -189,7 +189,7 @@
 - 验证方式：`npm test -- tests/contract/server-bootstrap.test.ts tests/contract/console-lifecycle.test.ts tests/contract/mcp-inspector.test.ts && npm run typecheck`；子进程测试同时捕获 stdout/stderr 并验证退出后旧地址失效。
 - 覆盖：Design Decision 1，启动/关闭、日志、MCP 兼容与迁移；Spec Requirement“实例启动与关闭”，MUST NOT“自动打开浏览器”“退出后持久化”“污染 MCP stdout”。
 - 对现有的影响：控制台成为实例必备组成部分；兼容旧 MCP 调用，但不再允许“无控制台仍报告完整启动”。版本回退使用旧构建产物，无数据迁移或状态恢复。
-- [ ] 完成
+- [x] 完成
 
 ### Task 10：完成安全边界、跨平台、构建与使用文档收口
 

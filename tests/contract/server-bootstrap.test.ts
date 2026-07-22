@@ -10,6 +10,8 @@ import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, resolveConfigPath, startServer } from "../../src/server.js";
 import { JsonLogger } from "../../src/observability/logger.js";
+import type { ConsoleServerOptions } from "../../src/console/console-server.js";
+import type { StaticAssetProvider } from "../../src/console/static-assets.js";
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const children: ReturnType<typeof spawn>[] = [];
@@ -261,9 +263,125 @@ describe("MCP stdio 启动入口", () => {
       "config.loaded", "service.started", "operation.state_changed", "approval.result",
       "connection.state_changed", "cleanup.result", "service.stopped"
     ]));
+    const ready = logLines.map((line) => JSON.parse(line) as { event: string; accessUrl?: string })
+      .filter((record) => record.event === "console.ready");
+    expect(ready).toHaveLength(1);
+    expect(ready[0]?.accessUrl).toMatch(/^http:\/\/[a-z0-9]{16,64}\.localhost:\d+\/#access_token=[A-Za-z0-9_-]{43,128}$/);
     expect(logLines.join("\n")).not.toContain("echo safe");
     expect(logLines.join("\n")).not.toContain(wiringConfigPath);
   });
+
+  it("按资产、控制台 listener、MCP transport 顺序启动，运行期致命错误进入同一幂等关闭", async () => {
+    const events: string[] = [];
+    let consoleOptions: ConsoleServerOptions | undefined;
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const originalStart = serverTransport.start.bind(serverTransport);
+    serverTransport.start = async () => { events.push("mcp.start"); await originalStart(); };
+    const runtime = await startServer(wiringConfigPath, {
+      transport: serverTransport,
+      adapter: {
+        connect: async () => { throw new Error("未调用"); },
+        shutdown: () => { events.push("adapter.close"); throw new Error("ssh close failed"); }
+      },
+      logger: new JsonLogger({ write: (line) => events.push(`log:${JSON.parse(line).event as string}`) }),
+      consoleAssetsLoader: async () => { events.push("assets"); return memoryAssets; },
+      consoleServerFactory: (options) => {
+        consoleOptions = options;
+        events.push("console.factory");
+        return {
+          start: async () => {
+            events.push("console.start");
+            const instanceId = options.auth!.instanceId;
+            return {
+              instanceId, port: 43210, origin: `http://${instanceId}.localhost:43210`,
+              accessUrl: `http://${instanceId}.localhost:43210/#access_token=${"x".repeat(43)}`
+            };
+          },
+          quiesce: () => events.push("console.quiesce"),
+          close: async () => { events.push("console.close"); }
+        };
+      }
+    });
+    expect(events.indexOf("assets")).toBeLessThan(events.indexOf("console.start"));
+    expect(events.indexOf("console.start")).toBeLessThan(events.indexOf("mcp.start"));
+    expect(events.indexOf("mcp.start")).toBeLessThan(events.indexOf("log:service.started"));
+    expect(events.filter((event) => event === "log:console.ready")).toHaveLength(1);
+
+    consoleOptions!.onFatalError?.(new Error("listener failed"));
+    await runtime.shutdown();
+    expect(events.filter((event) => event === "console.quiesce")).toHaveLength(1);
+    expect(events.filter((event) => event === "adapter.close")).toHaveLength(1);
+    expect(events.filter((event) => event === "console.close")).toHaveLength(1);
+    await clientTransport.close();
+  });
+
+  it("控制台资产、listener 或 MCP transport 启动失败会反向清理且不报告完整启动", async () => {
+    let factoryCalls = 0;
+    let adapterShutdowns = 0;
+    const logs: string[] = [];
+    await expect(startServer(wiringConfigPath, {
+      transport: {} as never,
+      adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => { adapterShutdowns += 1; } },
+      logger: new JsonLogger({ write: (line) => logs.push(line) }),
+      consoleAssetsLoader: async () => { throw new Error("asset failed"); },
+      consoleServerFactory: () => { factoryCalls += 1; throw new Error("不应调用"); },
+      shutdownTimeoutMs: 20
+    })).rejects.toThrow("asset failed");
+    expect(factoryCalls).toBe(0);
+    expect(adapterShutdowns).toBe(1);
+    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
+
+    const listenerEvents: string[] = [];
+    let mcpStarts = 0;
+    await expect(startServer(wiringConfigPath, {
+      transport: { start: async () => { mcpStarts += 1; } } as never,
+      adapter: {
+        connect: async () => { throw new Error("未调用"); },
+        shutdown: () => listenerEvents.push("adapter.close")
+      },
+      logger: new JsonLogger({ write: (line) => logs.push(line) }),
+      consoleAssetsLoader: async () => memoryAssets,
+      consoleServerFactory: () => ({
+        start: async () => { listenerEvents.push("console.start"); throw new Error("listener failed"); },
+        quiesce: () => listenerEvents.push("console.quiesce"),
+        close: async () => { listenerEvents.push("console.close"); }
+      }),
+      shutdownTimeoutMs: 20
+    })).rejects.toThrow("listener failed");
+    expect(mcpStarts).toBe(0);
+    expect(listenerEvents).toEqual([
+      "console.start", "console.quiesce", "adapter.close", "console.close"
+    ]);
+    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
+
+    const events: string[] = [];
+    await expect(startServer(wiringConfigPath, {
+      transport: { start: async () => { throw new Error("mcp failed"); } } as never,
+      adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => events.push("adapter.close") },
+      logger: new JsonLogger({ write: (line) => logs.push(line) }),
+      consoleAssetsLoader: async () => memoryAssets,
+      consoleServerFactory: () => ({
+        start: async () => {
+          events.push("console.start");
+          return {
+            instanceId: "instancealpha1234", port: 43210,
+            origin: "http://instancealpha1234.localhost:43210",
+            accessUrl: `http://instancealpha1234.localhost:43210/#access_token=${"x".repeat(43)}`
+          };
+        },
+        quiesce: () => events.push("console.quiesce"),
+        close: async () => { events.push("console.close"); }
+      }),
+      shutdownTimeoutMs: 20
+    })).rejects.toThrow("mcp failed");
+    expect(events).toEqual(expect.arrayContaining(["console.start", "console.quiesce", "adapter.close", "console.close"]));
+    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
+  });
+});
+
+const memoryAssets: StaticAssetProvider = Object.freeze({
+  paths: Object.freeze(["/"]),
+  read: (path) => path === "/" ? { path, body: Buffer.from("<!doctype html>") } : undefined
 });
 
 function collectJsonLines(child: ReturnType<typeof spawn>, count: number): Promise<unknown[]> {

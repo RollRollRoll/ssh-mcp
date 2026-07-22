@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -30,6 +31,14 @@ import { JsonLogger, LogEvents } from "./observability/logger.js";
 import { ErrorCodes } from "./errors/error-codes.js";
 import { CommandApplicationService } from "./application/command-application-service.js";
 import { ProfileApplicationService } from "./application/profile-application-service.js";
+import { ConsoleAuthGuard } from "./console/console-auth-guard.js";
+import { ConsoleServer, type ConsoleServerFactory, type ConsoleServerPort } from "./console/console-server.js";
+import { loadStaticAssets, type StaticAssetProvider } from "./console/static-assets.js";
+import { RuntimeRevisionHub } from "./console/runtime-revision-hub.js";
+import { RuntimeSnapshotProjector } from "./console/runtime-snapshot-projector.js";
+import { ConsoleReadRoutes } from "./console/read-routes.js";
+import { ConsoleActionRoutes } from "./console/action-routes.js";
+import { OperationControlService } from "./console/operation-control-service.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -72,6 +81,8 @@ export interface StartServerOptions {
   readonly adapter?: Pick<SshAdapter, "connect"> & { shutdown?: () => void };
   readonly logger?: JsonLogger;
   readonly shutdownTimeoutMs?: number;
+  readonly consoleServerFactory?: ConsoleServerFactory;
+  readonly consoleAssetsLoader?: () => Promise<StaticAssetProvider>;
 }
 
 export interface ServerRuntime {
@@ -219,10 +230,65 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
     coordinator
   });
 
-  await server.connect(options.transport ?? new StdioServerTransport());
-  logger.info(LogEvents.SERVICE_STARTED, { state: "active" });
-  return new ActiveServerRuntime(server, registry, manager, sessions, approval, adapter, logger,
-    options.shutdownTimeoutMs ?? config.limits.cancelConfirmationTimeoutMs);
+  const revisions = new RuntimeRevisionHub();
+  registry.subscribe(() => revisions.invalidate("hosts"));
+  manager.subscribe(() => revisions.invalidate("operations"));
+  sessions.subscribe(() => revisions.invalidate("sessions"));
+  approval.coordinator.subscribe(() => revisions.invalidate("approvals"));
+  const consoleAuth = new ConsoleAuthGuard();
+  const projector = new RuntimeSnapshotProjector({
+    instanceId: consoleAuth.instanceId,
+    revisions,
+    hosts: registry,
+    operations: manager,
+    sessions,
+    approvals: approval.coordinator,
+    profiles: () => profileApplication.list()
+  });
+  const readRoutes = new ConsoleReadRoutes(projector, revisions, manager);
+  const actionRoutes = new ConsoleActionRoutes(
+    commandApplication,
+    profileApplication,
+    approval.coordinator,
+    new OperationControlService(approval.coordinator, manager)
+  );
+  let runtime: ActiveServerRuntime | undefined;
+  let fatalBeforeReady = false;
+  let consoleServer: ConsoleServerPort | undefined;
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? config.limits.cancelConfirmationTimeoutMs;
+  try {
+    const assets = await (options.consoleAssetsLoader ?? defaultConsoleAssetsLoader)();
+    consoleServer = (options.consoleServerFactory ?? defaultConsoleServerFactory)({
+      assets,
+      auth: consoleAuth,
+      readRoutes,
+      actionRoutes,
+      onFatalError: () => {
+        if (runtime === undefined) fatalBeforeReady = true;
+        else void runtime.shutdown().catch(() => undefined);
+      }
+    });
+    server.server.onclose = () => {
+      if (runtime === undefined) fatalBeforeReady = true;
+      else void runtime.shutdown().catch(() => undefined);
+    };
+    const consoleInfo = await consoleServer.start();
+    if (fatalBeforeReady) throw new Error("控制台在启动阶段失效");
+    await server.connect(options.transport ?? new StdioServerTransport());
+    if (fatalBeforeReady) throw new Error("控制台在启动阶段失效");
+    runtime = new ActiveServerRuntime(
+      server, registry, manager, sessions, approval, adapter, logger, shutdownTimeoutMs,
+      projector, revisions, consoleServer
+    );
+    logger.consoleReady(consoleInfo.accessUrl);
+    logger.info(LogEvents.SERVICE_STARTED, { state: "active" });
+    return runtime;
+  } catch (error: unknown) {
+    await rollbackStartup(
+      server, manager, sessions, approval, adapter, projector, revisions, consoleServer, shutdownTimeoutMs
+    );
+    throw error;
+  }
 }
 
 class ActiveServerRuntime implements ServerRuntime {
@@ -236,7 +302,10 @@ class ActiveServerRuntime implements ServerRuntime {
     private readonly approval: ApprovalService,
     private readonly adapter: ConnectionTrackingSshAdapter,
     private readonly logger: JsonLogger,
-    private readonly shutdownTimeoutMs: number
+    private readonly shutdownTimeoutMs: number,
+    private readonly projector: RuntimeSnapshotProjector,
+    private readonly revisions: RuntimeRevisionHub,
+    private readonly consoleServer: ConsoleServerPort
   ) {}
 
   public shutdown(): Promise<void> {
@@ -245,16 +314,58 @@ class ActiveServerRuntime implements ServerRuntime {
   }
 
   private async shutdownOnce(): Promise<void> {
-    this.approval.shutdown();
-    const results = await Promise.allSettled([
-      bounded(this.server.close(), this.shutdownTimeoutMs),
+    let cleanupFailed = false;
+    cleanupFailed = !attemptCleanup(() => this.projector.setQuiescing()) || cleanupFailed;
+    cleanupFailed = !attemptCleanup(() => this.consoleServer.quiesce()) || cleanupFailed;
+    cleanupFailed = !attemptCleanup(() => this.approval.shutdown()) || cleanupFailed;
+    const operationResults = await Promise.allSettled([
       this.operations.shutdown(this.shutdownTimeoutMs),
       this.sessions.shutdown(this.shutdownTimeoutMs)
     ]);
-    this.adapter.shutdown();
-    const cleanupFailed = results.some((result) => result.status === "rejected");
+    cleanupFailed = !attemptCleanup(() => this.adapter.shutdown()) || cleanupFailed;
+    const mcpResults = await Promise.allSettled([bounded(this.server.close(), this.shutdownTimeoutMs)]);
+    const consoleResults = await Promise.allSettled([bounded(this.consoleServer.close(), this.shutdownTimeoutMs)]);
+    cleanupFailed = !attemptCleanup(() => this.revisions.close()) || cleanupFailed;
+    cleanupFailed = [...operationResults, ...mcpResults, ...consoleResults]
+      .some((result) => result.status === "rejected") || cleanupFailed;
     this.logger.info(LogEvents.CLEANUP_RESULT, { state: cleanupFailed ? "unknown" : "completed" });
     this.logger.info(LogEvents.SERVICE_STOPPED, { state: cleanupFailed ? "unknown" : "closed" });
+  }
+}
+
+const defaultConsoleServerFactory: ConsoleServerFactory = (options) => new ConsoleServer(options);
+
+async function defaultConsoleAssetsLoader(): Promise<StaticAssetProvider> {
+  return await loadStaticAssets(fileURLToPath(new URL("../dist/console/", import.meta.url)));
+}
+
+async function rollbackStartup(
+  server: McpServer,
+  operations: OperationManager,
+  sessions: SessionManager,
+  approval: ApprovalService,
+  adapter: ConnectionTrackingSshAdapter,
+  projector: RuntimeSnapshotProjector,
+  revisions: RuntimeRevisionHub,
+  consoleServer: ConsoleServerPort | undefined,
+  timeoutMs: number
+): Promise<void> {
+  attemptCleanup(() => projector.setQuiescing());
+  if (consoleServer !== undefined) attemptCleanup(() => consoleServer.quiesce());
+  attemptCleanup(() => approval.shutdown());
+  await Promise.allSettled([operations.shutdown(timeoutMs), sessions.shutdown(timeoutMs)]);
+  attemptCleanup(() => adapter.shutdown());
+  await Promise.allSettled([bounded(server.close(), timeoutMs)]);
+  if (consoleServer !== undefined) await Promise.allSettled([bounded(consoleServer.close(), timeoutMs)]);
+  attemptCleanup(() => revisions.close());
+}
+
+function attemptCleanup(cleanup: () => void): boolean {
+  try {
+    cleanup();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -265,6 +376,7 @@ async function bounded(work: Promise<void>, timeoutMs: number): Promise<void> {
       work,
       new Promise<void>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error("停止超时")), timeoutMs);
+        timer.unref();
       })
     ]);
   } finally {

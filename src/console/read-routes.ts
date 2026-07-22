@@ -54,7 +54,7 @@ export class ConsoleReadRoutes {
   }
 
   private openEvents(request: IncomingMessage, response: ServerResponse): void {
-    if (this.closed) throw new ConsoleHttpError(503, "RESOURCE_LIMIT");
+    if (this.closed) throw new ConsoleHttpError(503, "SERVICE_UNAVAILABLE");
     if (this.eventStreams.size >= MAX_SSE_CLIENTS) throw new ConsoleHttpError(429, "RESOURCE_LIMIT");
     response.writeHead(200, {
       ...CONSOLE_SECURITY_HEADERS,
