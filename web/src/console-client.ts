@@ -1,10 +1,21 @@
 import type { Dispatch } from "react";
 import type { ConsoleAction } from "./console-state";
-import type { OperationOutput, RuntimeSnapshot } from "./console-types";
+import type { ConsolePreview, OperationOutput, RuntimeSnapshot } from "./console-types";
 
 export interface ConsoleClient {
   readonly refresh: () => Promise<void>;
   readonly loadOutput: (operationId: string, cursor?: number) => Promise<OperationOutput>;
+  readonly previewCommand: (input: { readonly host: string; readonly command: string }) => Promise<ConsolePreview>;
+  readonly previewProfile: (input: {
+    readonly host: string;
+    readonly profileId: string;
+    readonly parameters: Readonly<Record<string, string | number | boolean>>;
+  }) => Promise<ConsolePreview>;
+  readonly decideApproval: (
+    approvalId: string,
+    action: "accept" | "decline" | "cancel",
+    expectedDigest: string
+  ) => Promise<void>;
   readonly close: () => void;
 }
 
@@ -41,12 +52,41 @@ export function createConsoleClient(dispatch: Dispatch<ConsoleAction>): ConsoleC
     loadOutput: (operationId, cursor = 0) => fetchJson<OperationOutput>(
       `/api/v1/operations/${encodeURIComponent(operationId)}/output?cursor=${cursor}&maxBytes=262144`
     ),
+    previewCommand: (input) => postJson<ConsolePreview>("/api/v1/previews/command", input),
+    previewProfile: (input) => postJson<ConsolePreview>("/api/v1/previews/profile", input),
+    decideApproval: async (approvalId, action, expectedDigest) => {
+      await postJson(`/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`, { action, expectedDigest });
+    },
     close: () => {
       if (closed) return;
       closed = true;
       events.close();
     }
   };
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-ssh-mcp-request": "1"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(await safeErrorCode(response));
+  return await response.json() as T;
+}
+
+async function safeErrorCode(response: Response): Promise<string> {
+  try {
+    const body = await response.json() as { readonly error?: { readonly code?: unknown } };
+    return typeof body.error?.code === "string" ? body.error.code : `HTTP_${response.status}`;
+  } catch {
+    return `HTTP_${response.status}`;
+  }
 }
 
 async function fetchJson<T>(path: string): Promise<T> {

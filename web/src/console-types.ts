@@ -41,6 +41,34 @@ export interface ConsoleApproval {
   readonly expiresAt: number;
 }
 
+export type ConsoleProfileParameter =
+  | { readonly type: "enum"; readonly name: string; readonly required: boolean; readonly values: readonly string[] }
+  | { readonly type: "integer"; readonly name: string; readonly required: boolean; readonly minimum?: number; readonly maximum?: number }
+  | { readonly type: "boolean"; readonly name: string; readonly required: boolean }
+  | { readonly type: "remotePath"; readonly name: string; readonly required: boolean };
+
+export interface ConsoleProfile {
+  readonly id: string;
+  readonly platform: "linux" | "windows";
+  readonly hostAliases: readonly string[];
+  readonly parameters: readonly ConsoleProfileParameter[];
+}
+
+export interface ConsolePreview {
+  readonly approvalId: string;
+  readonly operationId?: string;
+  readonly intent: {
+    readonly kind: "raw_command" | "profile";
+    readonly hosts: readonly string[];
+    readonly platformByHost: Readonly<Record<string, "linux" | "windows">>;
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly canonicalJson: string;
+  };
+  readonly impact: string;
+  readonly digest: string;
+  readonly expiresAt: number;
+}
+
 export interface RuntimeSnapshot {
   readonly instanceId: string;
   readonly revision: number;
@@ -49,7 +77,7 @@ export interface RuntimeSnapshot {
   readonly operations: readonly ConsoleOperation[];
   readonly sessions: readonly ConsoleSession[];
   readonly approvals: readonly ConsoleApproval[];
-  readonly profiles: readonly unknown[];
+  readonly profiles: readonly ConsoleProfile[];
 }
 
 export interface OutputFrame {

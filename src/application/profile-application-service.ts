@@ -119,7 +119,9 @@ export class ProfileApplicationService {
       return snapshot;
     }, { timeoutKind: "command", route: "web_only" });
     const approval = this.approval.getApproval(request.approvalId);
-    if (approval === undefined) throw new Error("网页审批记录未创建");
+    if (approval === undefined) {
+      throw new ApplicationServiceError(profileError(ErrorCodes.RESOURCE_LIMIT));
+    }
     return Object.freeze({
       approvalId: request.approvalId,
       ...(request.operationId === undefined ? {} : { operationId: request.operationId }),

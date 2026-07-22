@@ -153,7 +153,7 @@
 - 验证方式：`npm test -- tests/contract/console-actions.test.ts && npm --workspace web test -- console-actions && npm run typecheck`；Linux/Windows 测试分别覆盖命令、Profile 和首次 TOFU。
 - 覆盖：Design Decision 5、7，Command/Profile Application Services 与预览 API；Spec Requirement“网页发起操作”全部 Scenario，MUST NOT“网页多主机”“绕过 SSH 安全边界”。
 - 对现有的影响：增加比 MCP 低风险 Profile 更严格的网页确认，不改变 MCP Profile 自动执行规则。
-- [ ] 完成
+- [x] 完成
 
 ### Task 8：交付网页双通道审批、操作取消与无障碍交互闭环
 

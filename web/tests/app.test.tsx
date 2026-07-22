@@ -25,7 +25,10 @@ describe("控制台真实快照界面", () => {
       loadOutput: vi.fn(async (): Promise<OperationOutput> => ({
         frames: [{ stream: "stderr", cursor: 0, encoding: "utf8", data: "<script>危险文本</script>" }],
         nextCursor: 25, minCursor: 0, truncated: false, droppedBytes: 0
-      }))
+      })),
+      previewCommand: vi.fn(async () => { throw new Error("未调用"); }),
+      previewProfile: vi.fn(async () => { throw new Error("未调用"); }),
+      decideApproval: vi.fn(async () => undefined)
     };
     ({ root, container } = render((nextDispatch) => { dispatch = nextDispatch; return client; }));
     expect(container.textContent).toContain("正在连接本机控制台");
@@ -50,7 +53,14 @@ describe("控制台真实快照界面", () => {
     let dispatch!: React.Dispatch<ConsoleAction>;
     ({ root, container } = render((nextDispatch) => {
       dispatch = nextDispatch;
-      return { refresh: async () => undefined, loadOutput: async () => emptyOutput(), close: () => undefined };
+      return {
+        refresh: async () => undefined,
+        loadOutput: async () => emptyOutput(),
+        previewCommand: async () => { throw new Error("未调用"); },
+        previewProfile: async () => { throw new Error("未调用"); },
+        decideApproval: async () => undefined,
+        close: () => undefined
+      };
     }));
     await act(async () => dispatch({ type: "snapshot", snapshot: snapshot() }));
     expect(container.querySelector("main")?.dataset.writeEnabled).toBe("true");

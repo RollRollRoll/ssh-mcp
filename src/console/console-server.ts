@@ -4,6 +4,7 @@ import { ConsoleAuthGuard } from "./console-auth-guard.js";
 import { ConsoleHttpError, consoleErrorBody, CONSOLE_SECURITY_HEADERS } from "./http-errors.js";
 import type { StaticAssetProvider } from "./static-assets.js";
 import type { ConsoleReadRoutes } from "./read-routes.js";
+import type { ConsoleActionRoutes } from "./action-routes.js";
 
 export const MAX_CONSOLE_BODY_BYTES = 16 * 1024;
 export const MAX_CONSOLE_URL_BYTES = 2_048;
@@ -22,6 +23,7 @@ export interface ConsoleServerOptions {
   readonly assets: StaticAssetProvider;
   readonly auth?: ConsoleAuthGuard;
   readonly readRoutes?: ConsoleReadRoutes;
+  readonly actionRoutes?: ConsoleActionRoutes;
 }
 
 /** 严格白名单的本机 HTTP Origin；不提供 MCP transport 或通用工具调用接口。 */
@@ -119,10 +121,17 @@ export class ConsoleServer {
         return;
       }
       if (path.startsWith("/api/v1/")) {
+        const isAction = this.options.actionRoutes?.matches(request.method, path) === true;
         if (request.method === "GET") this.auth.validateRead(request);
+        else if (isAction) this.auth.validateWrite(request);
         else this.auth.validateBase(request, true);
         this.auth.validateSession(request);
         if (this.options.readRoutes?.handle(request, response) === true) return;
+        if (isAction) {
+          const result = this.options.actionRoutes!.handle(path, await readJsonBody(request));
+          this.respondJson(response, result.status, result.body);
+          return;
+        }
       }
       throw new ConsoleHttpError(request.method === "OPTIONS" ? 405 : 404,
         request.method === "OPTIONS" ? "METHOD_NOT_ALLOWED" : "NOT_FOUND");
@@ -151,6 +160,10 @@ export class ConsoleServer {
       ...extra
     });
     response.end(body);
+  }
+
+  private respondJson(response: ServerResponse, status: number, value: unknown): void {
+    this.respond(response, status, Buffer.from(JSON.stringify(value), "utf8"), "application/json; charset=utf-8");
   }
 }
 

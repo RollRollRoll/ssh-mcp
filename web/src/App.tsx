@@ -1,6 +1,10 @@
-import { useEffect, useReducer, useState, type Dispatch } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type Dispatch } from "react";
 import { createConsoleClient, type ConsoleClient } from "./console-client";
 import { consoleReducer, initialConsoleState, writesEnabled, type ConsoleAction } from "./console-state";
+import type { ConsolePreview } from "./console-types";
+import { CommandForm } from "./components/command-form";
+import { ProfileForm } from "./components/profile-form";
+import { OperationPreviewDialog } from "./components/operation-preview-dialog";
 
 export interface AppProps {
   readonly clientFactory?: (dispatch: Dispatch<ConsoleAction>) => ConsoleClient;
@@ -11,6 +15,10 @@ const terminalStates = new Set(["completed", "failed", "timed_out", "cancelled",
 export default function App({ clientFactory = createConsoleClient }: AppProps) {
   const [state, dispatch] = useReducer(consoleReducer, initialConsoleState);
   const [client, setClient] = useState<ConsoleClient>();
+  const [preview, setPreview] = useState<ConsolePreview>();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string>();
+  const actionVersion = useRef(0);
   const snapshot = state.snapshot;
   const selected = snapshot?.operations.find((item) => item.operationId === state.selectedOperationId);
 
@@ -33,6 +41,60 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
 
   const activeOperations = snapshot?.operations.filter((item) => !terminalStates.has(item.state)).length ?? 0;
   const pendingApprovals = snapshot?.approvals.filter((item) => item.state === "pending").length ?? 0;
+  const canWrite = writesEnabled(state) && client !== undefined;
+
+  const invalidatePreview = useCallback((): void => {
+    actionVersion.current += 1;
+    setPreview((current) => {
+      if (current !== undefined && client !== undefined) {
+        void client.decideApproval(current.approvalId, "cancel", current.digest).catch(() => undefined);
+      }
+      return undefined;
+    });
+    setActionBusy(false);
+    setActionMessage(undefined);
+  }, [client]);
+
+  const requestPreview = async (request: () => Promise<ConsolePreview>): Promise<void> => {
+    const version = ++actionVersion.current;
+    const previous = preview;
+    setPreview(undefined);
+    setActionMessage(undefined);
+    setActionBusy(true);
+    if (previous !== undefined && client !== undefined) {
+      void client.decideApproval(previous.approvalId, "cancel", previous.digest).catch(() => undefined);
+    }
+    try {
+      const next = await request();
+      if (version === actionVersion.current) setPreview(next);
+      else if (client !== undefined) {
+        void client.decideApproval(next.approvalId, "cancel", next.digest).catch(() => undefined);
+      }
+    } catch (error: unknown) {
+      if (version === actionVersion.current) {
+        setActionMessage(`预览失败：${error instanceof Error ? error.message : "INVALID_REQUEST"}`);
+      }
+    } finally {
+      if (version === actionVersion.current) setActionBusy(false);
+    }
+  };
+
+  const decidePreview = async (action: "accept" | "cancel"): Promise<void> => {
+    if (client === undefined || preview === undefined) return;
+    const current = preview;
+    actionVersion.current += 1;
+    setActionBusy(true);
+    try {
+      await client.decideApproval(current.approvalId, action, current.digest);
+      setPreview(undefined);
+      setActionMessage(action === "accept" ? "操作已接受，正在等待实时状态。" : "预览已取消，未执行操作。");
+    } catch (error: unknown) {
+      setPreview(undefined);
+      setActionMessage(`决定失败：${error instanceof Error ? error.message : "INVALID_REQUEST"}`);
+    } finally {
+      setActionBusy(false);
+    }
+  };
 
   return (
     <main className="console-page" data-write-enabled={writesEnabled(state) ? "true" : "false"}>
@@ -59,6 +121,25 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
             <article><span>待审批</span><strong>{pendingApprovals}</strong></article>
             <article><span>修订号</span><strong>{snapshot.revision}</strong></article>
           </section>
+
+          <section className="action-grid" aria-label="发起远程操作">
+            <article className="console-panel">
+              <header><h2>单主机命令</h2><small>提交前必须核对冻结预览</small></header>
+              <CommandForm hosts={snapshot.hosts} disabled={!canWrite} busy={actionBusy} onChange={invalidatePreview}
+                onPreview={(input) => {
+                  if (client !== undefined) void requestPreview(() => client.previewCommand(input));
+                }} />
+            </article>
+            <article className="console-panel">
+              <header><h2>低风险 Profile</h2><small>网页执行仍需明确确认</small></header>
+              <ProfileForm hosts={snapshot.hosts} profiles={snapshot.profiles} disabled={!canWrite} busy={actionBusy}
+                onChange={invalidatePreview}
+                onPreview={(input) => {
+                  if (client !== undefined) void requestPreview(() => client.previewProfile(input));
+                }} />
+            </article>
+          </section>
+          {actionMessage !== undefined && <p className="action-message" role="status">{actionMessage}</p>}
 
           <section className="console-grid">
             <article className="console-panel">
@@ -130,6 +211,8 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
           </section>
         </>
       )}
+      {preview !== undefined && <OperationPreviewDialog preview={preview} busy={actionBusy || !canWrite}
+        onAccept={() => void decidePreview("accept")} onCancel={() => void decidePreview("cancel")} />}
     </main>
   );
 }
