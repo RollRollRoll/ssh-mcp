@@ -1,5 +1,5 @@
 import type { ApprovalCoordinator, ApprovalSafeSnapshot } from "../approval/approval-coordinator.js";
-import type { LowRiskParameter } from "../config/schema.js";
+import type { ConsoleProfileSummary } from "../application/profile-application-service.js";
 import type { HostRegistry, HostSummary } from "../hosts/host-registry.js";
 import type { ConsoleOperationSummary, OperationManager } from "../operations/operation-manager.js";
 import type { SessionManager, SessionSnapshot } from "../sessions/session-manager.js";
@@ -21,13 +21,6 @@ export interface ConsoleApprovalView {
   readonly resolvedAt?: number;
   readonly resolvedBy?: ApprovalSafeSnapshot["resolvedBy"];
   readonly errorCode?: ApprovalSafeSnapshot["errorCode"];
-}
-
-export interface ConsoleProfileSummary {
-  readonly id: string;
-  readonly platform: "linux" | "windows";
-  readonly hostAliases: readonly string[];
-  readonly parameters: readonly LowRiskParameter[];
 }
 
 export interface RuntimeSnapshot {

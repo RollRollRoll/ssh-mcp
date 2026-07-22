@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { ErrorCodes, type ErrorCode } from "../errors/error-codes.js";
+import type { ApprovalRoute } from "../approval/approval-coordinator.js";
 import {
   TrustStore,
   TrustStoreConflictError,
@@ -19,6 +20,8 @@ export interface HostKeyTarget {
 export interface HostKeyVerificationContext extends AbortSignal {
   onConfirmationStart?: () => boolean;
   onConfirmationEnd?: () => boolean;
+  approvalRoute?: ApprovalRoute;
+  platform?: "linux" | "windows";
 }
 
 export interface TrustConfirmationRequest extends HostKeyTarget {
@@ -30,7 +33,7 @@ export interface TrustConfirmation {
   supportsForm(): boolean;
   confirm(
     request: TrustConfirmationRequest,
-    signal: AbortSignal
+    signal: HostKeyVerificationContext
   ): Promise<"accept" | "decline" | "cancel">;
 }
 
@@ -155,6 +158,9 @@ export class StrictHostKeyVerifier {
   private async requestConfirmation(request: TrustConfirmationRequest, signal?: HostKeyVerificationContext): Promise<boolean> {
     if (signal?.aborted) return false;
     const controller = new AbortController();
+    const confirmationSignal = controller.signal as HostKeyVerificationContext;
+    confirmationSignal.approvalRoute = signal?.approvalRoute ?? "dual";
+    confirmationSignal.platform = signal?.platform;
     let cancel: (() => void) | undefined;
     const cancelled = new Promise<boolean>((resolve) => {
       cancel = () => {
@@ -176,7 +182,7 @@ export class StrictHostKeyVerifier {
     });
     try {
       const result = await Promise.race([
-        this.confirmation.confirm(request, controller.signal).then((value) => value === "accept", () => false),
+        this.confirmation.confirm(request, confirmationSignal).then((value) => value === "accept", () => false),
         timedOut,
         cancelled
       ]);

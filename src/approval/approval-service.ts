@@ -20,6 +20,7 @@ import {
   type ApprovalResponse,
   type ApprovalRoute
 } from "./approval-coordinator.js";
+import type { ApprovalSafeSnapshot } from "./approval-coordinator.js";
 
 export {
   createApprovalForm,
@@ -50,6 +51,12 @@ export interface ApprovalResultEvent {
   readonly approved: boolean;
   readonly state: "completed" | McpOperationError["finalState"];
   readonly errorCode?: McpOperationError["code"];
+}
+
+export interface ApprovalOperationRequest<T> {
+  readonly approvalId: string;
+  readonly operationId?: string;
+  readonly result: Promise<ApprovalExecution<T>>;
 }
 
 /** 将 SDK 的已协商能力适配为可注入审批端口。 */
@@ -100,8 +107,18 @@ export class ApprovalService {
     sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>,
     options: ApprovalExecutionOptions = {}
   ): Promise<ApprovalExecution<T>> {
+    return await this.request(intent, sideEffect, options).result;
+  }
+
+  /** 网页预览需要立即取得 approvalId；最终结果仍沿用与 execute 相同的收敛路径。 */
+  public request<T>(
+    intent: OperationIntent,
+    sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>,
+    options: ApprovalExecutionOptions = {}
+  ): ApprovalOperationRequest<T> {
     if (!isVerifiedOperationIntent(intent)) {
-      return intentMismatchError();
+      const request = this.coordinator.request(intent, sideEffect, options);
+      return Object.freeze({ approvalId: request.approvalId, result: Promise.resolve(intentMismatchError()) });
     }
     const awaiting = this.operations?.create({
       initialState: "awaiting_approval",
@@ -114,7 +131,7 @@ export class ApprovalService {
     const operationId = awaiting?.operationId;
     let background = false;
     let executionBegan = false;
-    const execution = await this.coordinator.execute(intent, async (approvedIntent) => {
+    const request = this.coordinator.request(intent, async (approvedIntent) => {
       executionBegan = true;
       if (operationId !== undefined) {
         this.operations!.start(operationId, undefined, undefined, options.timeoutKind ?? "command");
@@ -130,23 +147,33 @@ export class ApprovalService {
       route: options.route ?? "dual",
       ...(operationId === undefined ? {} : { operationId })
     });
-
-    if (!execution.approved) {
-      const error = operationId === undefined ? execution.error : withOperationId(execution.error, operationId);
-      if (operationId !== undefined && !background) {
-        if (error.finalState === "timed_out") this.operations!.timedOut(operationId, error);
-        else if (executionBegan && error.finalState === "unknown") this.operations!.unknown(operationId, error);
-        else this.operations!.fail(operationId, error);
+    const result = request.result.then((execution) => {
+      if (!execution.approved) {
+        const error = operationId === undefined ? execution.error : withOperationId(execution.error, operationId);
+        if (operationId !== undefined && !background) {
+          if (error.finalState === "timed_out") this.operations!.timedOut(operationId, error);
+          else if (executionBegan && error.finalState === "unknown") this.operations!.unknown(operationId, error);
+          else this.operations!.fail(operationId, error);
+        }
+        this.publishResult({ operationId, digest: intent.digest, approved: false, state: error.finalState, errorCode: error.code });
+        return { approved: false as const, error };
       }
-      this.publishResult({ operationId, digest: intent.digest, approved: false, state: error.finalState, errorCode: error.code });
-      return { approved: false, error };
-    }
-    this.publishResult({ operationId, digest: intent.digest, approved: true, state: "completed" });
-    return execution;
+      this.publishResult({ operationId, digest: intent.digest, approved: true, state: "completed" });
+      return execution;
+    });
+    return Object.freeze({
+      approvalId: request.approvalId,
+      ...(operationId === undefined ? {} : { operationId }),
+      result
+    });
   }
 
   public shutdown(): void {
     this.coordinator.shutdown();
+  }
+
+  public getApproval(approvalId: string): ApprovalSafeSnapshot | undefined {
+    return this.coordinator.get(approvalId);
   }
 
   private publishResult(event: ApprovalResultEvent): void {
@@ -194,5 +221,6 @@ function consoleKindFor(kind: OperationIntentKind): ConsoleOperationKind {
     case "session_resize": return "session";
     case "upload":
     case "download": return "transfer";
+    case "host_trust": return "unknown";
   }
 }

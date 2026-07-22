@@ -58,7 +58,7 @@ export class SftpTransferBackend implements TransferBackend {
     let abortable: AbortableSftpConnection | undefined;
     try {
       throwIfAborted(signal);
-      connection = await this.adapter.connect(request.host);
+      connection = await this.adapter.connect(request.host, undefined, "dual");
       abortable = new AbortableSftpConnection(connection, signal,
         () => Object.assign(new Error("传输已取消"), {
           code: ErrorCodes.TRANSFER_FAILED,

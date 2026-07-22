@@ -44,7 +44,7 @@ export class SftpDirectoryTransferBackend implements DirectoryTransferBackend {
   public async prepare(request: TransferRequest, signal: AbortSignal): Promise<PreparedDirectoryTransfer> {
     if (!request.recursive) throw new DirectoryTransferSetupError(ErrorCodes.INVALID_ARGUMENT);
     throwIfAborted(signal);
-    const connection = await this.adapter.connect(request.host);
+    const connection = await this.adapter.connect(request.host, undefined, "dual");
     const abortable = new AbortableSftpConnection(connection, signal,
       () => Object.assign(new DirectoryTransferSetupError(ErrorCodes.TRANSFER_FAILED), {
         targetCreation: "unknown" as const

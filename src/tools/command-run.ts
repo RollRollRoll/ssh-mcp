@@ -1,9 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { type ApprovalExecution, type ApprovalExecutionContext, type ApprovalExecutionOptions, type ApprovalService } from "../approval/approval-service.js";
-import { createOperationIntent, type OperationIntent } from "../approval/operation-intent.js";
+import { type ApprovalService } from "../approval/approval-service.js";
 import { CommandRunner } from "../commands/command-runner.js";
-import { ErrorCodes, createMcpOperationError, type McpOperationError } from "../errors/error-contract.js";
+import {
+  ApplicationServiceError,
+  CommandApplicationService,
+  type CommandApprovalPort
+} from "../application/command-application-service.js";
+import type { McpOperationError } from "../errors/error-contract.js";
 import { HostRegistry } from "../hosts/host-registry.js";
 import { MultiHostCoordinator } from "../multihost/multi-host-coordinator.js";
 import { OperationManagerError } from "../operations/operation-manager.js";
@@ -30,72 +34,34 @@ const CommandRunOutputSchema = z.object({
   error: CommandErrorSchema.optional()
 }).strict();
 
-interface CommandApprovalPort {
-  execute<T>(intent: OperationIntent, sideEffect: (approvedIntent: OperationIntent, context?: ApprovalExecutionContext) => T | Promise<T>, options?: ApprovalExecutionOptions): Promise<ApprovalExecution<T>>;
-}
-
 export interface CommandRunDependencies {
   readonly registry: HostRegistry;
   readonly approval: CommandApprovalPort | ApprovalService;
   readonly runner: CommandRunner;
   readonly coordinator?: MultiHostCoordinator;
+  readonly application?: CommandApplicationService;
 }
 
 /** 原始命令的 MCP 外壳：完整主机集合在审批和任何操作创建之前解析。 */
 export function registerCommandRunTool(server: McpServer, dependencies: CommandRunDependencies): void {
+  const application = dependencies.application ?? new CommandApplicationService(
+    dependencies.registry, dependencies.approval, dependencies.runner, dependencies.coordinator
+  );
   server.registerTool("command_run", {
     description: "经一次性审批后在 1–10 个登记主机执行原始命令",
     inputSchema: CommandRunInputSchema,
     outputSchema: CommandRunOutputSchema
   }, async ({ hosts, command, executionMode }) => {
-    const resolvedHosts = hosts.map((alias) => dependencies.registry.get(alias));
-    if (resolvedHosts.some((host) => host === undefined)) {
-      return errorResult(commandError(ErrorCodes.HOST_NOT_REGISTERED));
-    }
-    const registeredHosts = resolvedHosts as NonNullable<(typeof resolvedHosts)[number]>[];
-    const intent = createOperationIntent({
-      kind: "raw_command",
-      hosts, platformByHost: Object.fromEntries(registeredHosts.map((host) => [host.alias, host.platform])),
-      payload: { command },
-      executionMode: executionMode ?? "parallel"
-    });
     try {
-      const approval = await dependencies.approval.execute(intent, (approvedIntent, context) => {
-        if (!sameIntent(intent, approvedIntent)) throw new IntentMismatchError();
-        const approvedCommand = approvedIntent.payload.command;
-        if (typeof approvedCommand !== "string") throw new Error("审批命令载荷无效");
-        if (registeredHosts.length === 1) {
-          const snapshot = dependencies.runner.start(registeredHosts[0]!, approvedCommand, context?.operationId);
-          context?.markBackground();
-          return snapshot;
-        }
-        if (dependencies.coordinator === undefined) throw new Error("多主机协调器不可用");
-        const snapshot = dependencies.coordinator.start({
-          hosts: registeredHosts, executionMode: approvedIntent.executionMode ?? "parallel", timeoutKind: "command",
-          failureCode: ErrorCodes.COMMAND_FAILED, timeoutCode: ErrorCodes.COMMAND_TIMEOUT,
-          start: (host) => dependencies.runner.start(host, approvedCommand)
-        }, context?.operationId);
-        context?.markBackground();
-        return snapshot;
-      }, { timeoutKind: "command" });
+      const approval = await application.execute({ source: "mcp", hosts, command, executionMode });
       if (!approval.approved) return errorResult(approval.error);
       return successResult(approval.value);
     } catch (error: unknown) {
-      if (error instanceof IntentMismatchError) return errorResult(commandError(ErrorCodes.APPROVAL_INTENT_MISMATCH));
+      if (error instanceof ApplicationServiceError) return errorResult(error.error);
       if (error instanceof OperationManagerError) return errorResult(error.error);
       throw error;
     }
   });
-}
-
-class IntentMismatchError extends Error {}
-
-function sameIntent(expected: OperationIntent, approved: OperationIntent): boolean {
-  return expected.kind === approved.kind && expected.digest === approved.digest && expected.canonicalJson === approved.canonicalJson;
-}
-
-function commandError(code: McpOperationError["code"]): McpOperationError {
-  return createMcpOperationError({ code, message: code, finalState: "failed", retriable: false, sideEffects: "none" });
 }
 
 function successResult(snapshot: { operationId: string; state: string }) {

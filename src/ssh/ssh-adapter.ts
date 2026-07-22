@@ -5,6 +5,7 @@ import type { Readable, Writable } from "node:stream";
 import type { HostConfig } from "../config/schema.js";
 import { ErrorCodes, type ErrorCode } from "../errors/error-codes.js";
 import type { HostKeyTarget, HostKeyVerificationContext } from "./host-key.js";
+import type { ApprovalRoute } from "../approval/approval-coordinator.js";
 import { runPlatformProbe, type ProbeChannel, type ProbeClient } from "./platform-probe.js";
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
@@ -129,7 +130,11 @@ export class SshAdapter {
     private readonly dependencies: SshAdapterDependencies = defaultDependencies
   ) {}
 
-  public async connect(host: HostConfig, timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS): Promise<SshConnection> {
+  public async connect(
+    host: HostConfig,
+    timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
+    approvalRoute: ApprovalRoute = "dual"
+  ): Promise<SshConnection> {
     if (this.shuttingDown) throw new SshAdapterError(ErrorCodes.CONNECTION_REFUSED);
     const authentication = await this.prepareAuthentication(host);
     if (this.shuttingDown) throw new SshAdapterError(ErrorCodes.CONNECTION_REFUSED);
@@ -166,6 +171,8 @@ export class SshAdapter {
       let pendingFailure: unknown;
       const lifecycle = new AbortController();
       const verificationContext = lifecycle.signal as HostKeyVerificationContext;
+      verificationContext.approvalRoute = approvalRoute;
+      verificationContext.platform = host.platform;
       let remainingMs = timeoutMs;
       let phaseStartedAt = 0;
       let phaseTimer: unknown;

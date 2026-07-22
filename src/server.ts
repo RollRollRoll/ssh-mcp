@@ -6,8 +6,9 @@ import { ConfigLoader } from "./config/loader.js";
 import { HostRegistry } from "./hosts/host-registry.js";
 import { OperationManager } from "./operations/operation-manager.js";
 import { ApprovalService, McpApprovalClient } from "./approval/approval-service.js";
+import { CoordinatedTrustConfirmation } from "./approval/coordinated-trust-confirmation.js";
 import { CommandRunner } from "./commands/command-runner.js";
-import { StrictHostKeyVerifier, type TrustConfirmation } from "./ssh/host-key.js";
+import { StrictHostKeyVerifier } from "./ssh/host-key.js";
 import { SshAdapter } from "./ssh/ssh-adapter.js";
 import { ConnectionTrackingSshAdapter } from "./ssh/connection-tracking-adapter.js";
 import { TrustStore } from "./ssh/trust-store.js";
@@ -27,6 +28,8 @@ import { SftpDirectoryTransferBackend } from "./transfers/directory-transfer-bac
 import { MultiHostCoordinator } from "./multihost/multi-host-coordinator.js";
 import { JsonLogger, LogEvents } from "./observability/logger.js";
 import { ErrorCodes } from "./errors/error-codes.js";
+import { CommandApplicationService } from "./application/command-application-service.js";
+import { ProfileApplicationService } from "./application/profile-application-service.js";
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
@@ -137,15 +140,16 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
   });
   const server = createServer(registry, manager);
   const approvalClient = new McpApprovalClient(server.server);
-  const confirmation: TrustConfirmation = {
-    supportsForm: () => approvalClient.supportsFormElicitation(),
-    confirm: async (request, signal) => (await approvalClient.elicit({
-        mode: "form",
-        message: `确认登记主机 ${request.alias} 的密钥：${request.algorithm} ${request.fingerprint}`,
-        requestedSchema: { type: "object", properties: {} },
-        timeoutMs: config.limits.approvalTimeoutMs
-      }, signal)).action
-  };
+  const approval = new ApprovalService(approvalClient, undefined, config.limits.approvalTimeoutMs, manager, (event) => {
+    if (event.operationId !== undefined) knownOperationIds.add(event.operationId);
+    logger.info(LogEvents.APPROVAL_RESULT, {
+      operationId: event.operationId,
+      state: event.state,
+      errorCode: event.errorCode,
+      details: { digest: event.digest }
+    });
+  });
+  const confirmation = new CoordinatedTrustConfirmation(approval.coordinator);
   // 命令和终端共享同一严格信任/认证适配器，但每次操作仍由适配器新建独立连接。
   const rawAdapter = options.adapter ?? new SshAdapter(new StrictHostKeyVerifier(
     new TrustStore(config.trustStore),
@@ -160,29 +164,28 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
   const adapter = new ConnectionTrackingSshAdapter(rawAdapter, registry, config.limits.connectTimeoutMs, (host, state) => {
     logger.info(LogEvents.CONNECTION_STATE_CHANGED, { host, state });
   });
-  const approval = new ApprovalService(approvalClient, undefined, config.limits.approvalTimeoutMs, manager, (event) => {
-    if (event.operationId !== undefined) knownOperationIds.add(event.operationId);
-    logger.info(LogEvents.APPROVAL_RESULT, {
-      operationId: event.operationId,
-      state: event.state,
-      errorCode: event.errorCode,
-      details: { digest: event.digest }
-    });
-  });
   const runner = new CommandRunner(adapter, manager, config.limits.connectTimeoutMs);
   const coordinator = new MultiHostCoordinator(manager);
+  const policy = new PolicyEngine(config.lowRiskProfiles);
+  const pathVerifier = new ProfileRemotePathVerifier();
+  const commandApplication = new CommandApplicationService(registry, approval, runner, coordinator);
+  const profileApplication = new ProfileApplicationService(
+    registry, policy, runner, approval, coordinator, pathVerifier
+  );
   registerCommandRunTool(server, {
     registry,
     approval,
     runner,
-    coordinator
+    coordinator,
+    application: commandApplication
   });
   registerProfileRunTool(server, {
     registry,
     runner,
     coordinator,
-    policy: new PolicyEngine(config.lowRiskProfiles),
-    pathVerifier: new ProfileRemotePathVerifier()
+    policy,
+    pathVerifier,
+    application: profileApplication
   });
   registerSessionTools(server, { registry, approval, sessions, adapter });
   const transferProgress = (event: {

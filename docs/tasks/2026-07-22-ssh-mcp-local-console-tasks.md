@@ -81,7 +81,7 @@
 - 验证方式：`npm test -- tests/unit/command-runner.test.ts tests/unit/approval.test.ts tests/unit/ssh-adapter.test.ts tests/contract/command-run.test.ts tests/contract/profile-run.test.ts && npm run typecheck`；Linux/Windows 既有命令与 TOFU 集成测试继续通过。
 - 覆盖：Design Decision 5、7，`CommandApplicationService`、`ProfileApplicationService`、TOFU route；Spec Requirement“网页发起操作”“安全展示与输入处理”，MUST NOT“网页多主机”“绕过 SSH 安全边界”。
 - 对现有的影响：把工具 handler 收窄为薄适配器；既有 MCP 自动 Profile 和安全输出契约不变。
-- [ ] 完成
+- [x] 完成
 
 ### Task 4：建立控制台权威投影、修订通知与统一取消服务
 

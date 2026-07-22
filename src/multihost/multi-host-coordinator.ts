@@ -6,7 +6,9 @@ import {
   type OperationGetResult,
   type OperationRunner,
   type OperationSnapshot,
-  type OperationTimeoutKind
+  type OperationTimeoutKind,
+  type ConsoleOperationKind,
+  type ConsoleOperationSource
 } from "../operations/operation-manager.js";
 import { DEFAULT_OUTPUT_READ_BYTES } from "../operations/output-buffer.js";
 import { isTerminalOperationState, type OperationState } from "../operations/state-machine.js";
@@ -36,6 +38,8 @@ export interface MultiHostStartOptions {
   readonly timeoutKind: OperationTimeoutKind;
   readonly failureCode: ErrorCode;
   readonly timeoutCode: ErrorCode;
+  readonly operationKind?: ConsoleOperationKind;
+  readonly source?: ConsoleOperationSource;
   /** 每次调用必须创建一个独立的单主机操作，绝不能复用 SSH 连接或 Operation。 */
   start(host: HostConfig): OperationSnapshot;
 }
@@ -87,6 +91,8 @@ class MultiHostExecution implements OperationRunner {
       ? this.manager.createWithoutBusinessTimeout({
         initialState: "running", runner: this, timeoutKind: this.options.timeoutKind,
         target: { hosts: this.options.hosts.map((host) => host.alias) },
+        operationKind: this.options.operationKind,
+        source: this.options.source,
         // 父操作不得以独立业务计时器抢占已启动子项的超时与停止确认窗口。
       })
       : this.manager.attachRunner(this.existingOperationId, this, this.options.timeoutKind, true);

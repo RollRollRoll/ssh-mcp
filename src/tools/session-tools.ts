@@ -181,7 +181,7 @@ async function openApprovedSession(
   const reserved = dependencies.sessions.reserve({ host: host.alias, platform: host.platform, shell: host.shell.type, columns, rows });
   let connection: SshConnection | undefined;
   try {
-    connection = await dependencies.adapter.connect(host);
+    connection = await dependencies.adapter.connect(host, undefined, "dual");
     const channel = await openShellWithinDeadline(connection, columns, rows, payload.shellCommand, dependencies.clock ?? defaultClock);
     return dependencies.sessions.activate(reserved.sessionId, connection, channel);
   } catch (error: unknown) {

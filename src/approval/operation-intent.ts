@@ -8,7 +8,8 @@ export type OperationIntentKind =
   | "session_input"
   | "session_resize"
   | "upload"
-  | "download";
+  | "download"
+  | "host_trust";
 export type ExecutionMode = "parallel" | "sequential";
 export type JsonValue = null | boolean | string | number | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -42,7 +43,8 @@ const operationIntentKinds = new Set<OperationIntentKind>([
   "session_input",
   "session_resize",
   "upload",
-  "download"
+  "download",
+  "host_trust"
 ]);
 
 const executionModes = new Set<ExecutionMode>(["parallel", "sequential"]);

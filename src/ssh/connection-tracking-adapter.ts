@@ -1,6 +1,7 @@
 import type { HostConfig } from "../config/schema.js";
 import { HostRegistry } from "../hosts/host-registry.js";
 import type { SshAdapter, SshConnection } from "./ssh-adapter.js";
+import type { ApprovalRoute } from "../approval/approval-coordinator.js";
 
 /** 为所有命令、会话与传输共用的连接入口维护当前连接引用计数。 */
 export class ConnectionTrackingSshAdapter {
@@ -11,10 +12,14 @@ export class ConnectionTrackingSshAdapter {
     private readonly onStateChange?: (host: string, state: "connected" | "disconnected") => void
   ) {}
 
-  public async connect(host: HostConfig): Promise<SshConnection> {
+  public async connect(
+    host: HostConfig,
+    _timeoutMs = this.connectTimeoutMs,
+    approvalRoute: ApprovalRoute = "dual"
+  ): Promise<SshConnection> {
     let connection: SshConnection;
     try {
-      connection = await this.adapter.connect(host, this.connectTimeoutMs);
+      connection = await this.adapter.connect(host, this.connectTimeoutMs, approvalRoute);
     } catch (error: unknown) {
       const before = this.registry.connectionState(host.alias);
       this.registry.connectionFailed(host.alias);

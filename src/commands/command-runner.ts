@@ -4,6 +4,8 @@ import type { HostConfig } from "../config/schema.js";
 import { OperationManager, type OperationRunner, type OperationSnapshot } from "../operations/operation-manager.js";
 import { SshAdapter, type SshConnection } from "../ssh/ssh-adapter.js";
 import { buildCommand } from "./command-builder.js";
+import type { ApprovalRoute } from "../approval/approval-coordinator.js";
+import type { ConsoleOperationKind, ConsoleOperationSource } from "../operations/operation-manager.js";
 
 interface CommandChannel {
   readonly stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
@@ -36,8 +38,19 @@ export class CommandRunner {
     private readonly connectTimeoutMs = 15_000
   ) {}
 
-  public start(host: HostConfig, command: string, operationId?: string, preflight?: CommandConnectionPreflight): OperationSnapshot {
-    const execution = new CommandExecution(this.adapter, this.manager, host, command, this.connectTimeoutMs, operationId, preflight);
+  public start(
+    host: HostConfig,
+    command: string,
+    operationId?: string,
+    preflight?: CommandConnectionPreflight,
+    approvalRoute: ApprovalRoute = "dual",
+    operationKind: ConsoleOperationKind = "command",
+    source: ConsoleOperationSource = "mcp"
+  ): OperationSnapshot {
+    const execution = new CommandExecution(
+      this.adapter, this.manager, host, command, this.connectTimeoutMs, operationId, preflight,
+      approvalRoute, operationKind, source
+    );
     return execution.start();
   }
 }
@@ -63,12 +76,18 @@ class CommandExecution implements OperationRunner {
     private readonly rawCommand: string,
     private readonly connectTimeoutMs: number,
     private readonly existingOperationId?: string,
-    private readonly preflight?: CommandConnectionPreflight
+    private readonly preflight?: CommandConnectionPreflight,
+    private readonly approvalRoute: ApprovalRoute = "dual",
+    private readonly operationKind: ConsoleOperationKind = "command",
+    private readonly source: ConsoleOperationSource = "mcp"
   ) {}
 
   public start(): OperationSnapshot {
     const snapshot = this.existingOperationId === undefined
-      ? this.manager.create({ initialState: "running", runner: this, timeoutKind: "command", target: { hosts: [this.host.alias] } })
+      ? this.manager.create({
+        initialState: "running", runner: this, timeoutKind: "command", target: { hosts: [this.host.alias] },
+        operationKind: this.operationKind, source: this.source
+      })
       : this.manager.attachRunner(this.existingOperationId, this, "command");
     this.operationId = snapshot.operationId;
     this.manager.updateResult(this.operationId, this.result());
@@ -100,7 +119,7 @@ class CommandExecution implements OperationRunner {
 
   private async run(): Promise<void> {
     try {
-      const connection = await this.adapter.connect(this.host, this.connectTimeoutMs);
+      const connection = await this.adapter.connect(this.host, this.connectTimeoutMs, this.approvalRoute);
       this.connection = connection;
       this.phase = "connection_ready";
       if (this.stopping) {

@@ -37,6 +37,11 @@ export class PolicyEngine {
     return this.profilesById.has(profileId);
   }
 
+  /** 仅供应用层生成更窄的控制台投影；返回值自身仍保持深冻结。 */
+  public profiles(): readonly LowRiskProfile[] {
+    return Object.freeze([...this.profilesById.values()]);
+  }
+
   public evaluate(input: { readonly profileId: string; readonly host: HostConfig; readonly parameters: unknown }): PolicyDecision {
     const profile = this.profilesById.get(input.profileId);
     if (profile === undefined) return rejection(ErrorCodes.POLICY_NOT_FOUND);
