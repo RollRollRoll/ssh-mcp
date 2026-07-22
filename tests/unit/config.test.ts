@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { testWithIds } from "../test-with-ids.js";
 import { ConfigLoader, loadConfigFromYaml } from "../../src/config/loader.js";
@@ -108,6 +109,33 @@ lowRiskProfiles:
 
     expect(loader.load()).toBe(loader.load());
     expect(reads).toBe(1);
+  });
+
+  it("把 ~/.ssh 下的私钥路径展开为服务进程用户的绝对路径", () => {
+    const source = baseConfig.replace(
+      "type: agent\n      socket: /run/user/1000/agent.sock",
+      "type: privateKeyFile\n      path: ~/.ssh/team/id_ed25519"
+    );
+
+    const config = loadConfigFromYaml(source, "/home/tester");
+
+    expect(config.hosts[0].auth).toEqual({
+      type: "privateKeyFile",
+      path: resolve("/home/tester", ".ssh", "team", "id_ed25519")
+    });
+  });
+
+  it.each([
+    ["用户主目录中的其他目录", "~/keys/id_ed25519"],
+    ["通过上级目录逃出 ~/.ssh", "~/.ssh/../id_ed25519"],
+    ["仅指定 ~/.ssh 目录", "~/.ssh"]
+  ])("拒绝 privateKeyFile 使用%s", (_name, path) => {
+    const source = baseConfig.replace(
+      "type: agent\n      socket: /run/user/1000/agent.sock",
+      `type: privateKeyFile\n      path: ${path}`
+    );
+
+    expect(() => loadConfigFromYaml(source, "/home/tester")).toThrow(/配置/);
   });
 
   it("接受启动时冻结的结构化低风险 Profile 与整数范围", () => {

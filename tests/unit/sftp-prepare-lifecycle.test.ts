@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { HostConfig } from "../../src/config/schema.js";
-import { OperationManager } from "../../src/operations/operation-manager.js";
+import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
 import type { SftpTransferSession, SshConnection } from "../../src/ssh/ssh-adapter.js";
 import { TransferService } from "../../src/transfers/file-transfer.js";
 import { SftpTransferBackend } from "../../src/transfers/sftp-transfer-backend.js";
@@ -34,6 +34,31 @@ const host: HostConfig = {
   username: "tester", auth: { type: "privateKeyFile", path: "/tmp/key" },
   shell: { type: "posix", command: "/bin/sh" }, remoteRoots: ["/safe"]
 };
+
+class ControlledClock implements MonotonicClock {
+  private nowMs = 0;
+  private sequence = 0;
+  private readonly timers = new Map<number, { due: number; callback: () => void }>();
+
+  public now(): number { return this.nowMs; }
+  public setTimeout(callback: () => void, delayMs: number): number {
+    const id = ++this.sequence;
+    this.timers.set(id, { due: this.nowMs + delayMs, callback });
+    return id;
+  }
+  public clearTimeout(timer: unknown): void { this.timers.delete(timer as number); }
+  public advance(delayMs: number): void {
+    this.nowMs += delayMs;
+    for (;;) {
+      const due = [...this.timers.entries()].filter(([, timer]) => timer.due <= this.nowMs);
+      if (due.length === 0) return;
+      for (const [id, timer] of due) {
+        this.timers.delete(id);
+        timer.callback();
+      }
+    }
+  }
+}
 
 describe("SFTP prepare 阶段资源所有权", () => {
   it("远端 writer 创建后重复取消时，挂起 destroy 仍有界关闭本地源、SFTP 与 SSH", async () => {
@@ -108,9 +133,12 @@ describe("SFTP prepare 阶段资源所有权", () => {
     const unhandled: unknown[] = [];
     let rejectLateUnlink: ((error: Error) => void) | undefined;
     let remoteHandleCloses = 0;
+    const clock = new ControlledClock();
     controlledOpen.hook = async (openedPath, handle) => {
       if (!openedPath.endsWith(".ssh-mcp-fixed.part")) return handle;
       events.push("local-target-open");
+      // 在目标确实创建后触发操作超时，避免并行测试负载改变被测场景。
+      clock.advance(5);
       await new Promise((resolve) => setTimeout(resolve, 30));
       return proxyHandle(handle, async () => {
         events.push("local-target-close");
@@ -135,6 +163,7 @@ describe("SFTP prepare 阶段资源所有权", () => {
       });
       const manager = new OperationManager({
         idFactory: () => "prepare-download-timeout",
+        clock,
         limits: { transferTimeoutMs: 5, cancelConfirmationTimeoutMs: 300 }
       });
       const service = new TransferService(manager, new SftpTransferBackend(

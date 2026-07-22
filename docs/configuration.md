@@ -1,6 +1,6 @@
 # 配置说明
 
-服务只读取一份 YAML 1.2 配置。配置在启动时校验并深冻结；不支持 YAML 锚点、别名或标签。所有路径必须是绝对路径且不含 `..`，主机环境只能是 `development` 或 `test`，主机数量为 1–10 台。
+服务只读取一份 YAML 1.2 配置。配置在启动时校验并深冻结；不支持 YAML 锚点、别名或标签。除 `privateKeyFile.path` 可使用 `~/.ssh/...` 外，所有路径必须是绝对路径；任何路径都不得包含 `..`。主机环境只能是 `development` 或 `test`，主机数量为 1–10 台。
 
 下面是一个完整结构示例。示例地址、用户名和路径均为占位符，不能直接用于生产，也不包含任何真实秘密。
 
@@ -41,7 +41,7 @@ hosts:
     username: developer
     auth:
       type: privateKeyFile
-      path: /absolute/keys/windows-test-ed25519
+      path: ~/.ssh/windows-test-ed25519
     shell:
       type: powershell
       command: powershell.exe
@@ -62,7 +62,7 @@ lowRiskProfiles:
 
 - `agent`：指定本机 SSH Agent 的绝对 socket 路径。
 - `pageant`：仅在支持 Pageant 的本机环境中使用，不提供额外凭据字段。
-- `privateKeyFile`：指定本机私钥文件的绝对路径。服务进程会读取该文件到内存并作为 `privateKey` 交给 `ssh2`，但不会从 YAML 或 MCP 参数接收私钥内容、密码或密钥口令，也不会持久化、记录或回显这些内容；服务同样不生成或轮换私钥。
+- `privateKeyFile`：指定本机私钥文件的绝对路径，或使用 `~/.ssh/...` 引用当前服务进程用户 SSH 目录内的私钥。`~/.ssh/...` 会在配置加载时展开为绝对路径，但不允许用 `..` 逃出该目录。服务进程会读取指定文件到内存并作为 `privateKey` 交给 `ssh2`，但不会扫描整个 `.ssh` 目录，也不会从 YAML 或 MCP 参数接收私钥内容、密码或密钥口令，不会持久化、记录或回显这些内容；服务同样不生成或轮换私钥。
 
 请在启动服务前由操作系统或现有 SSH 工具准备 Agent、Pageant 或私钥文件及其权限。不要把密码、私钥内容、口令或令牌写入 YAML、环境变量、日志或 MCP 工具参数。
 

@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { isAlias, isMap, isNode, isSeq, parseDocument } from "yaml";
 import { ConfigSchema, type SshMcpConfig } from "./schema.js";
 
@@ -38,7 +40,7 @@ export class ConfigLoader {
   }
 }
 
-export function loadConfigFromYaml(source: string): SshMcpConfig {
+export function loadConfigFromYaml(source: string, homeDirectory = homedir()): SshMcpConfig {
   try {
     const document = parseDocument(source, {
       version: "1.2",
@@ -53,7 +55,9 @@ export function loadConfigFromYaml(source: string): SshMcpConfig {
     }
 
     rejectAliasesAndTags(document.contents);
-    const parsed = ConfigSchema.safeParse(document.toJS({ maxAliasCount: 0 }));
+    const rawConfig = document.toJS({ maxAliasCount: 0 });
+    expandHomeSshPrivateKeyPaths(rawConfig, homeDirectory);
+    const parsed = ConfigSchema.safeParse(rawConfig);
     if (!parsed.success) {
       throw new ConfigError(parsed.error.issues.map((issue) => `${issue.path.join(".") || "根对象"}: ${issue.message}`).join("；"));
     }
@@ -64,6 +68,25 @@ export function loadConfigFromYaml(source: string): SshMcpConfig {
     }
     throw new ConfigError("YAML 解析失败", { cause: error });
   }
+}
+
+function expandHomeSshPrivateKeyPaths(value: unknown, homeDirectory: string): void {
+  if (!isRecord(value) || !Array.isArray(value.hosts)) return;
+
+  for (const host of value.hosts) {
+    if (!isRecord(host) || !isRecord(host.auth) || host.auth.type !== "privateKeyFile") continue;
+    if (typeof host.auth.path !== "string" || !isHomeSshPrivateKeyPath(host.auth.path)) continue;
+    host.auth.path = resolve(homeDirectory, ...host.auth.path.slice(2).split("/"));
+  }
+}
+
+function isHomeSshPrivateKeyPath(value: string): boolean {
+  if (!value.startsWith("~/.ssh/")) return false;
+  return value.slice(2).split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function rejectAliasesAndTags(node: unknown): void {
