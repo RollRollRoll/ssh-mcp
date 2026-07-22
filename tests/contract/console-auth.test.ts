@@ -49,6 +49,21 @@ describe("ConsoleAuthGuard", () => {
     }))).toThrow(expect.objectContaining({ status: 401 }));
   });
 
+  it("只读 GET 兼容浏览器省略 Origin，但仍要求严格同源 Fetch Metadata", () => {
+    const guard = auth("instancealpha1234", "a", "b");
+    guard.activate(43210);
+    const browserRead = request({
+      host: "instancealpha1234.localhost:43210",
+      "sec-fetch-site": "same-origin"
+    });
+    expect(() => guard.validateRead(browserRead)).not.toThrow();
+    expect(() => guard.validateRead(request({
+      ...browserRead.headers, origin: "http://evil.example"
+    }))).toThrow(expect.objectContaining({ status: 403 }));
+    expect(() => guard.validateRead(request({ host: browserRead.headers.host })))
+      .toThrow(expect.objectContaining({ status: 403 }));
+  });
+
   it("关闭后旧 access token 与会话立即失效", () => {
     const guard = auth("instancealpha1234", "a", "b");
     guard.activate(43210);

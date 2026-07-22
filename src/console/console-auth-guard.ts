@@ -86,6 +86,17 @@ export class ConsoleAuthGuard {
     }
   }
 
+  /** 浏览器同源 GET 可能不发送 Origin；此时必须由严格 Fetch Metadata 证明同源。 */
+  public validateRead(request: IncomingMessage): void {
+    this.validateBase(request, false);
+    if (request.headers.origin !== undefined && request.headers.origin !== this.expectedOrigin) {
+      throw new ConsoleHttpError(403, "FORBIDDEN");
+    }
+    if (request.headers["sec-fetch-site"] !== "same-origin") {
+      throw new ConsoleHttpError(403, "FORBIDDEN");
+    }
+  }
+
   public exchange(accessToken: unknown): string {
     if (this.closed || typeof accessToken !== "string" || !matchesDigest(accessToken, this.accessDigest)) {
       throw new ConsoleHttpError(401, "UNAUTHORIZED");

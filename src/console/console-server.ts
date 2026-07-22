@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { ConsoleAuthGuard } from "./console-auth-guard.js";
-import { ConsoleHttpError, consoleErrorBody } from "./http-errors.js";
+import { ConsoleHttpError, consoleErrorBody, CONSOLE_SECURITY_HEADERS } from "./http-errors.js";
 import type { StaticAssetProvider } from "./static-assets.js";
+import type { ConsoleReadRoutes } from "./read-routes.js";
 
 export const MAX_CONSOLE_BODY_BYTES = 16 * 1024;
 export const MAX_CONSOLE_URL_BYTES = 2_048;
@@ -20,6 +21,7 @@ export interface ConsoleServerInfo {
 export interface ConsoleServerOptions {
   readonly assets: StaticAssetProvider;
   readonly auth?: ConsoleAuthGuard;
+  readonly readRoutes?: ConsoleReadRoutes;
 }
 
 /** 严格白名单的本机 HTTP Origin；不提供 MCP transport 或通用工具调用接口。 */
@@ -74,10 +76,17 @@ export class ConsoleServer {
   public close(): Promise<void> {
     this.closePromise ??= new Promise((resolve) => {
       this.auth.close();
+      this.options.readRoutes?.close();
       if (!this.server.listening) { resolve(); return; }
-      this.server.close(() => resolve());
+      const forceTimer = setTimeout(() => {
+        for (const socket of this.sockets) socket.destroy();
+      }, 1_000);
+      forceTimer.unref();
+      this.server.close(() => {
+        clearTimeout(forceTimer);
+        resolve();
+      });
       this.server.closeIdleConnections();
-      for (const socket of this.sockets) socket.destroy();
     });
     return this.closePromise;
   }
@@ -89,7 +98,8 @@ export class ConsoleServer {
         throw new ConsoleHttpError(400, "INVALID_REQUEST");
       }
       const path = request.url!;
-      if (path.includes("?") || path.includes("%") || path.includes("\\") || path.includes("//")) {
+      const outputQuery = /^\/api\/v1\/operations\/[A-Za-z0-9-]{1,128}\/output\?/.test(path);
+      if ((path.includes("?") && !outputQuery) || path.includes("%") || path.includes("\\") || path.includes("//")) {
         throw new ConsoleHttpError(404, "NOT_FOUND");
       }
       if ((request.method === "GET" || request.method === "HEAD")
@@ -109,8 +119,10 @@ export class ConsoleServer {
         return;
       }
       if (path.startsWith("/api/v1/")) {
-        this.auth.validateBase(request, true);
+        if (request.method === "GET") this.auth.validateRead(request);
+        else this.auth.validateBase(request, true);
         this.auth.validateSession(request);
+        if (this.options.readRoutes?.handle(request, response) === true) return;
       }
       throw new ConsoleHttpError(request.method === "OPTIONS" ? 405 : 404,
         request.method === "OPTIONS" ? "METHOD_NOT_ALLOWED" : "NOT_FOUND");
@@ -133,11 +145,7 @@ export class ConsoleServer {
     extra: Readonly<Record<string, string>> = {}
   ): void {
     response.writeHead(status, {
-      "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
-      "x-frame-options": "DENY",
+      ...CONSOLE_SECURITY_HEADERS,
       ...(type === undefined ? {} : { "content-type": type }),
       ...(body === undefined ? {} : { "content-length": String(body.length) }),
       ...extra

@@ -135,7 +135,7 @@
 - 验证方式：`npm test -- tests/contract/console-read.test.ts && npm --workspace web test -- console-state && npm run typecheck`；契约测试覆盖 SSE ready/invalidation/offline、cursor 和断线释放。
 - 覆盖：Design Decision 3、8，Snapshot/SSE/输出同步与 React 状态模型；Spec Requirement“实例状态总览”“操作状态与输出”“实时同步与恢复”“安全展示与输入处理”。
 - 对现有的影响：只投影既有事实源，不增加磁盘状态、浏览器持久化或主动连接主机。
-- [ ] 完成
+- [x] 完成
 
 ### Task 7：交付网页命令与 Profile 的预览确认执行闭环
 

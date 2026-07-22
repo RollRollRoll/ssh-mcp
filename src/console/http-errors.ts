@@ -1,4 +1,13 @@
-export type ConsoleHttpErrorCode = "INVALID_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "PAYLOAD_TOO_LARGE" | "RESOURCE_LIMIT";
+export type ConsoleHttpErrorCode = "INVALID_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "METHOD_NOT_ALLOWED" | "PAYLOAD_TOO_LARGE" | "RESOURCE_LIMIT"
+  | "OPERATION_NOT_FOUND" | "OPERATION_EXPIRED" | "INVALID_CURSOR";
+
+export const CONSOLE_SECURITY_HEADERS = Object.freeze({
+  "cache-control": "no-store",
+  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY"
+});
 
 export class ConsoleHttpError extends Error {
   public constructor(readonly status: number, readonly code: ConsoleHttpErrorCode) {
