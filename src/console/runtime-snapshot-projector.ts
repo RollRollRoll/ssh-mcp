@@ -15,6 +15,7 @@ export interface ConsoleApprovalView {
   readonly expiresAt: number;
   readonly kind: ApprovalSafeSnapshot["kind"];
   readonly digest: string;
+  readonly safeView: ApprovalSafeSnapshot["safeView"];
   readonly hosts: readonly string[];
   readonly platformByHost: ApprovalSafeSnapshot["platformByHost"];
   readonly mcpChannelState?: ApprovalSafeSnapshot["mcpChannelState"];
@@ -83,6 +84,7 @@ function projectApprovals(records: readonly ApprovalSafeSnapshot[]): readonly Co
     expiresAt: record.expiresAt,
     kind: record.kind,
     digest: record.digest,
+    safeView: deepFreezeClone(record.safeView),
     hosts: Object.freeze([...record.hosts]),
     platformByHost: Object.freeze({ ...record.platformByHost }),
     ...(record.mcpChannelState === undefined ? {} : { mcpChannelState: record.mcpChannelState }),

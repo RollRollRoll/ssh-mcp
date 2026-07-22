@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import type { ConsoleClient } from "../src/console-client";
 import type { ConsoleAction } from "../src/console-state";
-import type { OperationOutput, RuntimeSnapshot } from "../src/console-types";
+import type { OperationCancelResponse, OperationOutput, RuntimeSnapshot } from "../src/console-types";
 
 describe("控制台真实快照界面", () => {
   let root: Root | undefined;
@@ -28,7 +28,10 @@ describe("控制台真实快照界面", () => {
       })),
       previewCommand: vi.fn(async () => { throw new Error("未调用"); }),
       previewProfile: vi.fn(async () => { throw new Error("未调用"); }),
-      decideApproval: vi.fn(async () => undefined)
+      decideApproval: vi.fn(async () => undefined),
+      cancelOperation: vi.fn(async (): Promise<OperationCancelResponse> => ({
+        status: "terminal", operation: snapshot().operations[0]!
+      }))
     };
     ({ root, container } = render((nextDispatch) => { dispatch = nextDispatch; return client; }));
     expect(container.textContent).toContain("正在连接本机控制台");
@@ -59,6 +62,7 @@ describe("控制台真实快照界面", () => {
         previewCommand: async () => { throw new Error("未调用"); },
         previewProfile: async () => { throw new Error("未调用"); },
         decideApproval: async () => undefined,
+        cancelOperation: async () => ({ status: "terminal", operation: snapshot().operations[0]! }),
         close: () => undefined
       };
     }));

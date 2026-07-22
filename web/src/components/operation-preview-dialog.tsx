@@ -1,4 +1,6 @@
+import { useCallback, useRef } from "react";
 import type { ConsolePreview } from "../console-types";
+import { useDialogFocus } from "./use-dialog-focus";
 
 export function OperationPreviewDialog({ preview, busy, onAccept, onCancel }: {
   readonly preview: ConsolePreview;
@@ -6,10 +8,13 @@ export function OperationPreviewDialog({ preview, busy, onAccept, onCancel }: {
   readonly onAccept: () => void;
   readonly onCancel: () => void;
 }) {
+  const dialog = useRef<HTMLElement>(null);
+  const escape = useCallback(() => { if (!busy) onCancel(); }, [busy, onCancel]);
+  useDialogFocus(dialog, escape);
   const command = typeof preview.intent.payload.command === "string" ? preview.intent.payload.command : "";
   return (
     <div className="dialog-backdrop">
-      <section className="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+      <section ref={dialog} tabIndex={-1} className="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
         <header><p className="eyebrow">FROZEN OPERATION INTENT</p><h2 id="preview-title">确认精确远程操作</h2></header>
         <dl>
           <div><dt>目标主机</dt><dd>{preview.intent.hosts.join(", ")}</dd></div>

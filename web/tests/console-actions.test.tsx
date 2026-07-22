@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { createConsoleClient, type ConsoleClient } from "../src/console-client";
 import type { ConsoleAction } from "../src/console-state";
-import type { ConsolePreview, RuntimeSnapshot } from "../src/console-types";
+import type { ConsolePreview, OperationCancelResponse, RuntimeSnapshot } from "../src/console-types";
 
 describe("控制台操作表单", () => {
   let root: Root | undefined;
@@ -110,6 +110,9 @@ function mockClient(overrides: Partial<ConsoleClient> = {}): ConsoleClient {
     previewCommand: vi.fn(async () => preview("raw_command", "true")),
     previewProfile: vi.fn(async () => preview("profile", "true")),
     decideApproval: vi.fn(async () => undefined),
+    cancelOperation: vi.fn(async (): Promise<OperationCancelResponse> => ({
+      status: "terminal", operation: snapshot().operations[0]!
+    })),
     close: vi.fn(),
     ...overrides
   };

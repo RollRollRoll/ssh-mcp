@@ -171,7 +171,7 @@
 - 验证方式：`npm test -- tests/contract/console-control.test.ts && npm --workspace web test -- console-control && npm run typecheck`；竞态测试断言每项副作用次数不超过 1。
 - 覆盖：Design `ApprovalCoordinator`、`OperationControlService`、React 可用性；Spec Requirement“双通道审批”“网页取消操作”“控制台可用性”。
 - 对现有的影响：网页成为 MCP 审批的并行决定通道，但不改变 MCP 工具调用的最终安全结果和错误分类。
-- [ ] 完成
+- [x] 完成
 
 ### Task 9：把控制台纳入 MCP 进程启动、关闭、日志与兼容路径
 

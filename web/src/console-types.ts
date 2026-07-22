@@ -39,6 +39,20 @@ export interface ConsoleApproval {
   readonly hosts: readonly string[];
   readonly createdAt: number;
   readonly expiresAt: number;
+  readonly digest: string;
+  readonly safeView: {
+    readonly operation: {
+      readonly kind: string;
+      readonly hosts: readonly string[];
+      readonly platformByHost: Readonly<Record<string, "linux" | "windows">>;
+      readonly payload: Readonly<Record<string, unknown>>;
+      readonly executionMode?: "parallel" | "sequential";
+    };
+    readonly impact: string;
+  };
+  readonly resolvedAt?: number;
+  readonly resolvedBy?: "web" | "mcp" | "timeout" | "shutdown";
+  readonly errorCode?: string;
 }
 
 export type ConsoleProfileParameter =
@@ -94,4 +108,9 @@ export interface OperationOutput {
   readonly minCursor: number;
   readonly truncated: boolean;
   readonly droppedBytes: number;
+}
+
+export interface OperationCancelResponse {
+  readonly status: "approval_cancelled" | "cancel_requested" | "terminal";
+  readonly operation: ConsoleOperation;
 }

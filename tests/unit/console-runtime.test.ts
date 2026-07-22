@@ -94,7 +94,7 @@ describe("RuntimeSnapshotProjector", () => {
     sessions.reserve({ host: "alpha", platform: "linux", shell: "posix", columns: 80, rows: 24 });
     const intent = createOperationIntent({
       kind: "raw_command", hosts: ["alpha"], platformByHost: { alpha: "linux" },
-      payload: { command: "echo 不得进入总览" }
+      payload: { command: "echo 完整审批命令" }
     });
     approvals.request(intent, () => undefined, { route: "web_only", operationId: "transfer-1" });
     expect(scheduled).toHaveLength(1);
@@ -109,10 +109,11 @@ describe("RuntimeSnapshotProjector", () => {
     });
     expect(snapshot.sessions[0]).toMatchObject({ sessionId: "session-1", host: "alpha", state: "opening" });
     expect(snapshot.approvals[0]).toMatchObject({
-      approvalId: "approval-1", operationId: "transfer-1", state: "pending", hosts: ["alpha"]
+      approvalId: "approval-1", operationId: "transfer-1", state: "pending", hosts: ["alpha"],
+      safeView: { operation: { payload: { command: "echo 完整审批命令" } } }
     });
     const serialized = JSON.stringify(snapshot);
-    for (const forbidden of ["private-key", "/allowed", "/local/private", "/remote/private", "内部错误", "不得进入总览", "username"]) {
+    for (const forbidden of ["private-key", "/allowed", "/local/private", "/remote/private", "内部错误", "username"]) {
       expect(serialized).not.toContain(forbidden);
     }
 

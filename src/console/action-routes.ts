@@ -9,6 +9,7 @@ import type { ProfileApplicationService, ProfilePreview } from "../application/p
 import { ErrorCodes } from "../errors/error-codes.js";
 import { OperationManagerError } from "../operations/operation-manager.js";
 import { ConsoleHttpError } from "./http-errors.js";
+import type { OperationControlService } from "./operation-control-service.js";
 
 const boundedText = z.string().min(1).max(12 * 1024);
 const CommandPreviewSchema = z.object({ host: boundedText, command: boundedText }).strict();
@@ -23,6 +24,8 @@ const DecisionSchema = z.object({
   expectedDigest: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict();
 const decisionPath = /^\/api\/v1\/approvals\/([A-Za-z0-9-]{1,128})\/decision$/;
+const cancelPath = /^\/api\/v1\/operations\/([A-Za-z0-9-]{1,128})\/cancel$/;
+const EmptySchema = z.object({}).strict();
 
 export interface ConsoleActionResponse {
   readonly status: number;
@@ -34,13 +37,14 @@ export class ConsoleActionRoutes {
   public constructor(
     private readonly commands: Pick<CommandApplicationService, "preview">,
     private readonly profiles: Pick<ProfileApplicationService, "preview">,
-    private readonly approvals: ApprovalCoordinator
+    private readonly approvals: ApprovalCoordinator,
+    private readonly control?: OperationControlService
   ) {}
 
   public matches(method: string | undefined, path: string | undefined): boolean {
     if (method !== "POST" || path === undefined) return false;
     return path === "/api/v1/previews/command" || path === "/api/v1/previews/profile"
-      || decisionPath.test(path);
+      || decisionPath.test(path) || (this.control !== undefined && cancelPath.test(path));
   }
 
   public handle(path: string, body: unknown): ConsoleActionResponse {
@@ -52,6 +56,11 @@ export class ConsoleActionRoutes {
       if (path === "/api/v1/previews/profile") {
         const input = parse(ProfilePreviewSchema, body);
         return { status: 201, body: projectPreview(this.profiles.preview(input)) };
+      }
+      const cancellation = cancelPath.exec(path);
+      if (cancellation !== null && this.control !== undefined) {
+        parse(EmptySchema, body);
+        return { status: 200, body: this.control.cancel(cancellation[1]!) };
       }
       const match = decisionPath.exec(path);
       if (match === null) throw new ConsoleHttpError(404, "NOT_FOUND");
@@ -73,8 +82,10 @@ export class ConsoleActionRoutes {
       if (error instanceof ConsoleHttpError) throw error;
       if (error instanceof ApplicationServiceError) throw applicationHttpError(error);
       if (error instanceof OperationManagerError) {
-        throw new ConsoleHttpError(error.code === ErrorCodes.RESOURCE_LIMIT ? 429 : 400,
-          error.code === ErrorCodes.RESOURCE_LIMIT ? "RESOURCE_LIMIT" : "INVALID_REQUEST");
+        if (error.code === ErrorCodes.RESOURCE_LIMIT) throw new ConsoleHttpError(429, "RESOURCE_LIMIT");
+        if (error.code === ErrorCodes.OPERATION_NOT_FOUND) throw new ConsoleHttpError(404, "OPERATION_NOT_FOUND");
+        if (error.code === ErrorCodes.OPERATION_EXPIRED) throw new ConsoleHttpError(410, "OPERATION_EXPIRED");
+        throw new ConsoleHttpError(400, "INVALID_REQUEST");
       }
       throw error;
     }

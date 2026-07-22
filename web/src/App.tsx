@@ -5,6 +5,8 @@ import type { ConsolePreview } from "./console-types";
 import { CommandForm } from "./components/command-form";
 import { ProfileForm } from "./components/profile-form";
 import { OperationPreviewDialog } from "./components/operation-preview-dialog";
+import { ApprovalDialog } from "./components/approval-dialog";
+import { OperationDetail } from "./components/operation-detail";
 
 export interface AppProps {
   readonly clientFactory?: (dispatch: Dispatch<ConsoleAction>) => ConsoleClient;
@@ -18,9 +20,13 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
   const [preview, setPreview] = useState<ConsolePreview>();
   const [actionBusy, setActionBusy] = useState(false);
   const [actionMessage, setActionMessage] = useState<string>();
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string>();
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [cancellingOperations, setCancellingOperations] = useState<ReadonlySet<string>>(new Set());
   const actionVersion = useRef(0);
   const snapshot = state.snapshot;
   const selected = snapshot?.operations.find((item) => item.operationId === state.selectedOperationId);
+  const selectedApproval = snapshot?.approvals.find((item) => item.approvalId === selectedApprovalId);
 
   useEffect(() => {
     const current = clientFactory(dispatch);
@@ -93,6 +99,39 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
       setActionMessage(`决定失败：${error instanceof Error ? error.message : "INVALID_REQUEST"}`);
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const decideSharedApproval = async (action: "accept" | "decline" | "cancel"): Promise<void> => {
+    if (client === undefined || selectedApproval === undefined) return;
+    setApprovalBusy(true);
+    try {
+      await client.decideApproval(selectedApproval.approvalId, action, selectedApproval.digest);
+      setSelectedApprovalId(undefined);
+      setActionMessage(action === "accept" ? "审批已接受。" : action === "decline" ? "审批已拒绝。" : "审批已取消。");
+    } catch (error: unknown) {
+      const code = error instanceof Error ? error.message : "INVALID_REQUEST";
+      setSelectedApprovalId(undefined);
+      setActionMessage(code === "APPROVAL_ALREADY_RESOLVED" ? "该审批已由其他通道处理，正在同步最新状态。" : `审批失败：${code}`);
+      void client.refresh();
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const cancelSelectedOperation = async (): Promise<void> => {
+    if (client === undefined || selected === undefined || cancellingOperations.has(selected.operationId)) return;
+    const operationId = selected.operationId;
+    setCancellingOperations((current) => new Set(current).add(operationId));
+    setActionMessage("已请求取消；最终状态以远端停止确认结果为准。");
+    try {
+      const result = await client.cancelOperation(operationId);
+      if (result.status === "terminal") {
+        setCancellingOperations((current) => without(current, operationId));
+      }
+    } catch (error: unknown) {
+      setCancellingOperations((current) => without(current, operationId));
+      setActionMessage(`取消失败：${error instanceof Error ? error.message : "INVALID_REQUEST"}`);
     }
   };
 
@@ -174,6 +213,9 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
 
             <article className="console-panel output-panel">
               <header><h2>操作输出</h2><small>{selected?.operationId ?? "尚未选择操作"}</small></header>
+              {selected !== undefined && <OperationDetail operation={selected} disabled={!canWrite}
+                cancelPending={cancellingOperations.has(selected.operationId)}
+                onCancel={() => void cancelSelectedOperation()} />}
               {selected === undefined ? <Empty text="选择一个操作后显示缓冲输出。" />
                 : state.output === undefined ? <Empty text="正在读取输出。" />
                   : state.output.frames.length === 0 ? <Empty text="该操作尚无输出。" /> : (
@@ -203,8 +245,11 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
               <header><h2>审批</h2><small>当前进程的协调状态</small></header>
               {snapshot.approvals.length === 0 ? <Empty text="当前没有审批记录。" /> : (
                 <ul className="record-list">{snapshot.approvals.map((approval) => (
-                  <li key={approval.approvalId}><strong>{approval.approvalId}</strong>
-                    <span>{approval.kind} · {approval.hosts.join(", ")}</span><StateBadge value={approval.state} /></li>
+                  <li key={approval.approvalId}><button type="button" className="record-button"
+                    onClick={() => setSelectedApprovalId(approval.approvalId)}>
+                    <strong>{approval.approvalId}</strong>
+                    <span>{approval.kind} · {approval.hosts.join(", ")}</span><StateBadge value={approval.state} />
+                  </button></li>
                 ))}</ul>
               )}
             </article>
@@ -213,6 +258,10 @@ export default function App({ clientFactory = createConsoleClient }: AppProps) {
       )}
       {preview !== undefined && <OperationPreviewDialog preview={preview} busy={actionBusy || !canWrite}
         onAccept={() => void decidePreview("accept")} onCancel={() => void decidePreview("cancel")} />}
+      {selectedApproval !== undefined && <ApprovalDialog approval={selectedApproval}
+        busy={approvalBusy || !canWrite}
+        onDecision={(action) => void decideSharedApproval(action)}
+        onClose={() => setSelectedApprovalId(undefined)} />}
     </main>
   );
 }
@@ -222,7 +271,23 @@ function Empty({ text }: { readonly text: string }) {
 }
 
 function StateBadge({ value }: { readonly value: string }) {
-  return <span className={`state-badge state-${value}`}>{value}</span>;
+  return <span className={`state-badge state-${value}`}>{stateLabel(value)}</span>;
+}
+
+function stateLabel(value: string): string {
+  return ({
+    unknown: "未知", connecting: "连接中", connected: "已连接", disconnected: "已断开",
+    awaiting_approval: "等待审批", pending: "等待审批", running: "运行中", completed: "已完成",
+    accepted: "已接受", declined: "已拒绝", failed: "失败", timed_out: "已超时",
+    cancelled: "已取消", partial_failure: "部分失败", cancel_requested: "已请求取消",
+    opening: "正在打开", active: "活动", closing: "正在关闭", closed: "已关闭"
+  } as Record<string, string>)[value] ?? value;
+}
+
+function without(values: ReadonlySet<string>, value: string): ReadonlySet<string> {
+  const next = new Set(values);
+  next.delete(value);
+  return next;
 }
 
 function connectionLabel(state: "connecting" | "syncing" | "online" | "disconnected"): string {

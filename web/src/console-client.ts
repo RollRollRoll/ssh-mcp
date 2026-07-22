@@ -1,6 +1,6 @@
 import type { Dispatch } from "react";
 import type { ConsoleAction } from "./console-state";
-import type { ConsolePreview, OperationOutput, RuntimeSnapshot } from "./console-types";
+import type { ConsolePreview, OperationCancelResponse, OperationOutput, RuntimeSnapshot } from "./console-types";
 
 export interface ConsoleClient {
   readonly refresh: () => Promise<void>;
@@ -16,6 +16,7 @@ export interface ConsoleClient {
     action: "accept" | "decline" | "cancel",
     expectedDigest: string
   ) => Promise<void>;
+  readonly cancelOperation: (operationId: string) => Promise<OperationCancelResponse>;
   readonly close: () => void;
 }
 
@@ -57,6 +58,9 @@ export function createConsoleClient(dispatch: Dispatch<ConsoleAction>): ConsoleC
     decideApproval: async (approvalId, action, expectedDigest) => {
       await postJson(`/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`, { action, expectedDigest });
     },
+    cancelOperation: (operationId) => postJson<OperationCancelResponse>(
+      `/api/v1/operations/${encodeURIComponent(operationId)}/cancel`, {}
+    ),
     close: () => {
       if (closed) return;
       closed = true;
