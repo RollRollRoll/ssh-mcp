@@ -46,25 +46,37 @@ describe("MCP Inspector 协议验收", () => {
     expect(hosts.isError).not.toBe(true);
   });
 
-  testWithIds(["SC-002", "SC-003", "MN-001"], "AC-MCP-02：正式 MCP Inspector CLI 严格拒绝额外及缺失字段，且不支持 form 时批准前零 SSH/文件副作用", async () => {
-    const fixture = await createFixture();
+  testWithIds(["SC-002", "SC-003", "MN-001"], "AC-MCP-02：正式 MCP Inspector CLI 严格拒绝额外及缺失字段，且不支持 form 时保持 pending、批准前零 SSH/文件副作用", async () => {
+    const fixture = await createFixture(1);
     const extra = await inspector(fixture.configPath, "tools/call", "hosts_list", { host: "dynamic-host" });
     const missing = await inspector(fixture.configPath, "tools/call", "operation_get", {});
     const unsupported = await inspector(fixture.configPath, "tools/call", "command_run", {
       hosts: ["linux-test"], command: "echo never", dynamicUsername: "forbidden"
     });
-    const approvalUnsupported = await inspector(fixture.configPath, "tools/call", "command_run", {
-      hosts: ["linux-test"], command: "echo never"
-    });
 
     expect(extra).toMatchObject({ isError: true });
     expect(missing).toMatchObject({ isError: true });
     expect(unsupported).toMatchObject({ isError: true });
-    expect(approvalUnsupported).toMatchObject({
-      isError: true,
-      structuredContent: { error: { code: "APPROVAL_UNSUPPORTED", sideEffects: "none" } }
-    });
+
+    const session = startRawSession(fixture.configPath);
+    await session.initialize({});
+    const pending = session.beginToolCall("command_run", { hosts: ["linux-test"], command: "echo never" });
+    const earlyResult = await Promise.race([
+      pending.response.then(() => "resolved" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 150))
+    ]);
+    expect(earlyResult).toBe("pending");
+    expect(session.elicitation).toBeUndefined();
     expect(existsSync(fixture.trustStorePath)).toBe(false);
+
+    pending.cancel();
+    let stoppedGracefully = false;
+    try {
+      await expect(session.stop()).resolves.toEqual({ code: 0, signal: null });
+      stoppedGracefully = true;
+    } finally {
+      if (!stoppedGracefully) await session.forceStop();
+    }
   });
 
   testWithIds(["SC-033"], "AC-MCP-03：补充的原始多请求会话创建长操作、查询、取消并读取确定终态", async () => {
@@ -591,7 +603,7 @@ function resolveInspectorCli(): string {
   return cliPath;
 }
 
-async function createFixture(): Promise<{ configPath: string; trustStorePath: string }> {
+async function createFixture(resultRetentionMs = 15_000): Promise<{ configPath: string; trustStorePath: string }> {
   const directory = mkdtempSync(join(tmpdir(), "ssh-mcp-inspector-"));
   fixtureDirectories.push(directory);
   const privateKeyPath = join(directory, "fixture-ed25519.pem");
@@ -614,7 +626,7 @@ limits:
   approvalTimeoutMs: 5000
   cancelConfirmationTimeoutMs: 1000
   outputBufferBytes: 1048576
-  resultRetentionMs: 15000
+  resultRetentionMs: ${resultRetentionMs}
 hosts:
   - alias: linux-test
     environment: test
@@ -668,13 +680,58 @@ class RawJsonRpcSession {
     return await this.request("tools/call", { name, arguments: args });
   }
 
+  public beginToolCall(name: string, args: Record<string, unknown>): PendingJsonRpcRequest {
+    return this.beginRequest("tools/call", { name, arguments: args });
+  }
+
+  public async stop(): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }> {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      return { code: this.child.exitCode, signal: this.child.signalCode };
+    }
+    const exited = new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>((resolve) => {
+      this.child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    this.child.kill("SIGTERM");
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1_500); })
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (result === undefined) throw new Error("原始 framing 会话收到 SIGTERM 后未在 1500ms 内自行退出");
+    return result;
+  }
+
+  public async forceStop(): Promise<void> {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => this.child.once("close", () => resolve()));
+    this.child.kill("SIGKILL");
+    const stopped = await Promise.race([
+      exited.then(() => true as const),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_000))
+    ]);
+    if (!stopped) throw new Error("原始 framing 会话未在测试强制清理期限内退出");
+  }
+
   private request(method: string, params: Record<string, unknown>): Promise<JsonRpcMessage> {
+    return this.beginRequest(method, params).response;
+  }
+
+  private beginRequest(method: string, params: Record<string, unknown>): PendingJsonRpcRequest {
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.responses.delete(id); reject(new Error(`原始 framing 会话未收到 ${method} 响应`)); }, 8_000);
+    let timer: NodeJS.Timeout | undefined;
+    const response = new Promise<JsonRpcMessage>((resolve, reject) => {
+      timer = setTimeout(() => { this.responses.delete(id); reject(new Error(`原始 framing 会话未收到 ${method} 响应`)); }, 8_000);
       this.responses.set(id, (message) => { clearTimeout(timer); resolve(message); });
       this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
+    return {
+      response,
+      cancel: () => {
+        if (timer !== undefined) clearTimeout(timer);
+        this.responses.delete(id);
+      }
+    };
   }
 
   private read(chunk: Buffer): void {
@@ -695,6 +752,11 @@ class RawJsonRpcSession {
 }
 
 type JsonRpcMessage = { readonly id?: number; readonly method?: string; readonly params?: unknown; readonly result?: unknown; readonly error?: unknown };
+
+interface PendingJsonRpcRequest {
+  readonly response: Promise<JsonRpcMessage>;
+  cancel(): void;
+}
 
 function toolStructured(message: JsonRpcMessage): Record<string, unknown> {
   expect(message.error).toBeUndefined();

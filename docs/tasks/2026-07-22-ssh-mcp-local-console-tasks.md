@@ -62,7 +62,7 @@
 - 验证方式：`npm test -- tests/unit/approval.test.ts && npm run typecheck`；测试使用计数闭包和可控时钟覆盖完整竞争矩阵。
 - 覆盖：Design Decision 6，`ApprovalCoordinator`、审批仲裁与错误处理；Spec Requirement“双通道审批”全部 Scenario。
 - 对现有的影响：替换 `ApprovalService` 的单通道失败路径；既有 MCP 调用的批准前零副作用和一次性 Intent 语义保持不变。
-- [ ] 完成
+- [x] 完成
 
 ### Task 3：统一命令/Profile 应用服务并显式传播审批路由
 

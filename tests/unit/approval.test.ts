@@ -15,6 +15,10 @@ import {
   type OperationIntent
 } from "../../src/approval/operation-intent.js";
 import { OperationManager, type MonotonicClock } from "../../src/operations/operation-manager.js";
+import {
+  ApprovalCoordinator,
+  type ApprovalSafeSnapshot
+} from "../../src/approval/approval-coordinator.js";
 
 describe("OperationIntent", () => {
   testWithIds(["SC-018", "SC-019"], "以稳定 canonical JSON、SHA-256 摘要和深冻结绑定完整操作", () => {
@@ -150,6 +154,7 @@ describe("ApprovalService", () => {
     expect(sideEffects.calls).toBe(1);
     expect(executedIntent).toBe(intent);
     expect(sideEffects.lastIntent).toBe(intent);
+    expect(client.forms[0]?.message).toContain("影响摘要");
     expect(client.forms[0]?.message).toContain(executedIntent?.canonicalJson ?? "missing");
     expect(client.forms[0]?.message).toContain(executedIntent?.digest ?? "missing");
   });
@@ -272,44 +277,603 @@ describe("ApprovalService", () => {
     expect(timeoutSideEffects.calls).toBe(0);
   });
 
-  it("审批通道断链时不执行副作用", async () => {
+  it("MCP 审批通道断链时保留网页通道，最终仍由统一期限保守结算", async () => {
     const client = new FakeApprovalClient(true);
-    const service = new ApprovalService(client, new FakeClock());
+    const clock = new SharedFakeClock();
+    const service = new ApprovalService(client, clock, 10);
     const sideEffects = new SideEffectProbe();
     const pending = service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run());
     await Promise.resolve();
     client.reject(new Error("transport disconnected"));
+    await Promise.resolve();
+
+    expect(service.coordinator.list()).toEqual([
+      expect.objectContaining({ state: "pending", mcpChannelState: "failed" })
+    ]);
+    clock.advance(10);
+    await expect(pending).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_TIMEOUT", finalState: "timed_out", sideEffects: "none" }
+    });
+    expect(sideEffects.calls).toBe(0);
+  });
+
+  it("把 awaiting Operation 的 operationId 传入审批安全快照", async () => {
+    const client = new FakeApprovalClient(false);
+    const manager = new OperationManager({ idFactory: () => "operation-awaiting" });
+    const service = new ApprovalService(client, new FakeClock(), 120_000, manager);
+
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => "done");
+
+    expect(service.coordinator.list()).toEqual([
+      expect.objectContaining({ operationId: "operation-awaiting", state: "pending" })
+    ]);
+    service.coordinator.decide(service.coordinator.list()[0]!.approvalId, "decline");
+    await pending;
+  });
+
+  it("结果订阅者异常不改变已完成的 Operation 与审批返回值", async () => {
+    const client = new FakeApprovalClient(false);
+    const manager = new OperationManager({ idFactory: () => "operation-result-listener" });
+    const service = new ApprovalService(client, new FakeClock(), 120_000, manager, () => {
+      throw new Error("result listener failed");
+    });
+
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => "done");
+    const approval = service.coordinator.list()[0]!;
+    expect(() => service.coordinator.decide(approval.approvalId, "accept")).not.toThrow();
+
+    await expect(pending).resolves.toMatchObject({ approved: true, value: "done" });
+    expect(manager.get("operation-result-listener")).toMatchObject({ state: "completed" });
+  });
+
+  it("后台运行器接管后副作用 Promise 失败不再由审批层结算 Operation", async () => {
+    const client = new FakeApprovalClient(false);
+    const clock = new SharedFakeClock();
+    const manager = new OperationManager({ clock, idFactory: () => "operation-background-owned" });
+    const service = new ApprovalService(client, clock, 120_000, manager);
+    let rejectAfterHandoff!: (error: Error) => void;
+    const runner = { cancel: () => undefined };
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), (_intent, context) => {
+      manager.attachRunner(context!.operationId!, runner, "command");
+      context!.markBackground();
+      return new Promise<never>((_resolve, reject) => { rejectAfterHandoff = reject; });
+    });
+    const approval = service.coordinator.list()[0]!;
+
+    service.coordinator.decide(approval.approvalId, "accept");
+    expect(manager.get("operation-background-owned")).toMatchObject({ state: "running" });
+    rejectAfterHandoff(new Error("wrapper failed after handoff"));
 
     await expect(pending).resolves.toMatchObject({
       approved: false,
+      error: { code: "STATE_UNKNOWN", finalState: "unknown", operationId: "operation-background-owned" }
+    });
+    expect(manager.get("operation-background-owned")).toMatchObject({ state: "running" });
+    expect(manager.complete("operation-background-owned")).toMatchObject({ state: "completed" });
+  });
+
+  it("客户端未声明 form elicitation 时 dual 保留网页审批直到原期限，不请求、不执行", async () => {
+    const client = new FakeApprovalClient(false);
+    const clock = new FakeClock();
+    const service = new ApprovalService(client, clock);
+    const sideEffects = new SideEffectProbe();
+
+    const pending = service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run());
+    await Promise.resolve();
+    expect(client.forms).toHaveLength(0);
+    clock.advance(120_000);
+    await expect(pending)
+      .resolves.toMatchObject({
+        approved: false,
+        error: {
+          code: "APPROVAL_TIMEOUT",
+          finalState: "timed_out",
+          retriable: false,
+          sideEffects: "none"
+        }
+      });
+    expect(sideEffects.calls).toBe(0);
+  });
+});
+
+describe("ApprovalCoordinator", () => {
+  it("初始 onRevision 同步重入接受后不再启动孤立的 MCP elicitation", async () => {
+    const client = new FakeApprovalClient(true);
+    const sideEffects = new SideEffectProbe();
+    let coordinator!: ApprovalCoordinator;
+    coordinator = new ApprovalCoordinator({
+      client,
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-reentrant-initial-revision",
+      onRevision: (snapshot) => {
+        if (snapshot.state === "pending") coordinator.decide(snapshot.approvalId, "accept");
+      }
+    });
+
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+
+    await expect(request.result).resolves.toMatchObject({ approved: true, value: "executed" });
+    expect(coordinator.get(request.approvalId)).toMatchObject({ state: "accepted", resolvedBy: "web" });
+    expect(sideEffects.calls).toBe(1);
+    expect(client.forms).toHaveLength(0);
+    expect(client.signal).toBeUndefined();
+  });
+
+  it("非 Abort 的 MCP 异常只标记通道失败，网页仍可接受并执行一次", async () => {
+    const client = new FakeApprovalClient(true);
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-mcp-channel-failed"
+    });
+    const sideEffects = new SideEffectProbe();
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+    client.reject(new Error("secret transport failure"));
+    await Promise.resolve();
+
+    expect(coordinator.get(request.approvalId)).toMatchObject({
+      state: "pending",
+      mcpChannelState: "failed"
+    });
+    expect(coordinator.get(request.approvalId)).not.toHaveProperty("resolvedBy");
+    expect(coordinator.decide(request.approvalId, "accept")).toMatchObject({
+      status: "resolved",
+      approval: { state: "accepted", resolvedBy: "web" }
+    });
+    await expect(request.result).resolves.toMatchObject({ approved: true, value: "executed" });
+    expect(sideEffects.calls).toBe(1);
+    expect(JSON.stringify(coordinator.get(request.approvalId))).not.toContain("secret transport failure");
+  });
+
+  it("onRevision 同步异常不会打断资源清理、Intent 消费、副作用或 Promise 结算", async () => {
+    const client = new FakeApprovalClient(true);
+    const clock = new SharedFakeClock();
+    const sideEffects = new SideEffectProbe();
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock,
+      resultRetentionMs: 5,
+      maxRecords: 1,
+      idFactory: () => "approval-listener-failed",
+      onRevision: () => { throw new Error("revision listener failed"); }
+    });
+
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+    expect(() => coordinator.decide(request.approvalId, "accept")).not.toThrow();
+    await expect(request.result).resolves.toMatchObject({ approved: true, value: "executed" });
+    expect(sideEffects.calls).toBe(1);
+    expect(client.signal?.aborted).toBe(true);
+
+    clock.advance(5);
+    expect(coordinator.get(request.approvalId)).toBeUndefined();
+  });
+
+  it("安全快照包含脱离 Intent 的深冻结完整操作与影响摘要，不暴露 canonical JSON", () => {
+    const coordinator = new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-safe-view"
+    });
+    const intent = createOperationIntent(approvalIntentInput());
+    const request = coordinator.request(intent, () => "done", { route: "web_only", operationId: "operation-safe-view" });
+    const snapshot = coordinator.get(request.approvalId)!;
+
+    expect(snapshot).toMatchObject({
+      operationId: "operation-safe-view",
+      safeView: {
+        operation: {
+          kind: intent.kind,
+          hosts: intent.hosts,
+          platformByHost: intent.platformByHost,
+          payload: intent.payload,
+          executionMode: intent.executionMode
+        },
+        impact: expect.any(String)
+      }
+    });
+    expect(snapshot.safeView.operation).not.toBe(intent);
+    expect(snapshot.safeView.operation.payload).not.toBe(intent.payload);
+    expect(Object.isFrozen(snapshot.safeView)).toBe(true);
+    expect(Object.isFrozen(snapshot.safeView.operation)).toBe(true);
+    expect(Object.isFrozen(snapshot.safeView.operation.payload)).toBe(true);
+    expect(snapshot).not.toHaveProperty("canonicalJson");
+    expect(snapshot.safeView).not.toHaveProperty("canonicalJson");
+  });
+
+  it("网页快照与 MCP form 的影响摘要区分通道失败和保守终止", () => {
+    const client = new FakeApprovalClient(true);
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-impact-summary"
+    });
+    const expectedImpact = "批准后会在所列主机上执行此精确操作一次；MCP 审批通道失败后，网页仍可在审批期限内决定；服务关闭、拒绝、取消或超时均不会执行。";
+    const request = coordinator.request(createOperationIntent(approvalIntentInput()), () => "done");
+
+    expect(coordinator.get(request.approvalId)?.safeView.impact).toBe(expectedImpact);
+    expect(client.forms[0]?.message).toContain(`影响摘要：${expectedImpact}`);
+  });
+
+  it.each([
+    ["maxRecords", 0],
+    ["maxRecords", -1],
+    ["maxRecords", 1.5],
+    ["maxRecords", Number.NaN],
+    ["maxRecords", Number.POSITIVE_INFINITY],
+    ["maxRecords", Number.MAX_SAFE_INTEGER + 1],
+    ["approvalTimeoutMs", 0],
+    ["approvalTimeoutMs", -1],
+    ["approvalTimeoutMs", 1.5],
+    ["approvalTimeoutMs", Number.NaN],
+    ["approvalTimeoutMs", Number.POSITIVE_INFINITY],
+    ["approvalTimeoutMs", Number.MAX_SAFE_INTEGER + 1],
+    ["resultRetentionMs", 0],
+    ["resultRetentionMs", -1],
+    ["resultRetentionMs", 1.5],
+    ["resultRetentionMs", Number.NaN],
+    ["resultRetentionMs", Number.POSITIVE_INFINITY],
+    ["resultRetentionMs", Number.MAX_SAFE_INTEGER + 1]
+  ] as const)("拒绝非法协调器选项 %s=%s", (name, value) => {
+    expect(() => new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      [name]: value
+    })).toThrow(RangeError);
+  });
+
+  it("接受最小正安全整数的容量与期限", () => {
+    expect(() => new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      maxRecords: 1,
+      approvalTimeoutMs: 1,
+      resultRetentionMs: 1
+    })).not.toThrow();
+  });
+
+  it.each([
+    ["maxRecords", 65],
+    ["maxRecords", Number.MAX_SAFE_INTEGER],
+    ["approvalTimeoutMs", 600_001],
+    ["approvalTimeoutMs", 2_147_483_648],
+    ["approvalTimeoutMs", Number.MAX_SAFE_INTEGER],
+    ["resultRetentionMs", 3_600_001],
+    ["resultRetentionMs", 2_147_483_648],
+    ["resultRetentionMs", Number.MAX_SAFE_INTEGER]
+  ] as const)("拒绝超过项目资源预算的协调器选项 %s=%s", (name, value) => {
+    expect(() => new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      [name]: value
+    })).toThrow(RangeError);
+  });
+
+  it("接受与项目资源预算一致的容量与期限上限", () => {
+    expect(() => new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      maxRecords: 64,
+      approvalTimeoutMs: 600_000,
+      resultRetentionMs: 3_600_000
+    })).not.toThrow();
+  });
+
+  it("web-first 同步接受唯一生效，中止 MCP，其他标签页稳定返回 already_resolved", async () => {
+    const client = new FakeApprovalClient(true);
+    const clock = new SharedFakeClock();
+    const revisions: ApprovalSafeSnapshot[] = [];
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock,
+      approvalTimeoutMs: 100,
+      resultRetentionMs: 50,
+      idFactory: () => "approval-web-first",
+      onRevision: (snapshot) => revisions.push(snapshot)
+    });
+    const sideEffects = new SideEffectProbe();
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent),
+      { route: "dual" }
+    );
+
+    expect(coordinator.get(request.approvalId)).toMatchObject({
+      approvalId: "approval-web-first",
+      route: "dual",
+      state: "pending",
+      revision: 1
+    });
+    expect(sideEffects.calls).toBe(0);
+    expect(client.forms).toHaveLength(1);
+
+    expect(coordinator.decide(request.approvalId, "accept")).toMatchObject({
+      status: "resolved",
+      approval: { state: "accepted", resolvedBy: "web" }
+    });
+    expect(sideEffects.calls).toBe(1);
+    expect(client.signal?.aborted).toBe(true);
+    expect(coordinator.decide(request.approvalId, "decline")).toMatchObject({
+      status: "already_resolved",
+      approval: { state: "accepted", resolvedBy: "web" }
+    });
+    await expect(request.result).resolves.toMatchObject({ approved: true, value: "executed" });
+    expect(revisions.at(-1)).toMatchObject({ state: "accepted", resolvedBy: "web" });
+  });
+
+  it("MCP-first 发布已处理 revision，后到网页决定不能改变结果", async () => {
+    const client = new FakeApprovalClient(true);
+    const revisions: ApprovalSafeSnapshot[] = [];
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-mcp-first",
+      onRevision: (snapshot) => revisions.push(snapshot)
+    });
+    const sideEffects = new SideEffectProbe();
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+
+    client.resolve({ action: "accept" });
+    await expect(request.result).resolves.toMatchObject({ approved: true });
+    expect(sideEffects.calls).toBe(1);
+    expect(revisions.at(-1)).toMatchObject({ state: "accepted", resolvedBy: "mcp", revision: 2 });
+    expect(coordinator.decide(request.approvalId, "cancel")).toMatchObject({
+      status: "already_resolved",
+      approval: { state: "accepted", resolvedBy: "mcp" }
+    });
+    expect(sideEffects.calls).toBe(1);
+  });
+
+  it.each([
+    ["web accept", "web", "accept", "accepted", 1],
+    ["web decline", "web", "decline", "declined", 0],
+    ["web cancel", "web", "cancel", "cancelled", 0],
+    ["MCP accept", "mcp", "accept", "accepted", 1],
+    ["MCP decline", "mcp", "decline", "declined", 0],
+    ["MCP cancel", "mcp", "cancel", "cancelled", 0],
+    ["timeout", "timeout", "cancel", "timed_out", 0],
+    ["shutdown", "shutdown", "cancel", "cancelled", 0]
+  ] as const)("%s 首先结算后，后到网页接受始终无效", async (_name, source, action, state, calls) => {
+    const client = new FakeApprovalClient(true);
+    const clock = new SharedFakeClock();
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock,
+      approvalTimeoutMs: 10,
+      idFactory: () => `approval-race-${source}-${action}`
+    });
+    const sideEffects = new SideEffectProbe();
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+
+    if (source === "web") coordinator.decide(request.approvalId, action);
+    else if (source === "mcp") {
+      client.resolve({ action });
+      await Promise.resolve();
+    } else if (source === "timeout") clock.advance(10);
+    else coordinator.shutdown();
+
+    if (source === "shutdown") {
+      expect(coordinator.get(request.approvalId)).toBeUndefined();
+      expect(coordinator.decide(request.approvalId, "accept")).toEqual({ status: "not_found" });
+    } else {
+      expect(coordinator.get(request.approvalId)?.state).toBe(state);
+      expect(coordinator.decide(request.approvalId, "accept")).toMatchObject({ status: "already_resolved" });
+    }
+    await request.result;
+    expect(sideEffects.calls).toBe(calls);
+  });
+
+  it("web_only 不调用 MCP；dual 在客户端不支持 form 时仍于原期限等待网页", async () => {
+    const client = new FakeApprovalClient(false);
+    const clock = new SharedFakeClock();
+    let sequence = 0;
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock,
+      approvalTimeoutMs: 20,
+      idFactory: () => `approval-route-${sequence++}`
+    });
+    const webOnlyEffects = new SideEffectProbe();
+    const webOnly = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => webOnlyEffects.run(intent),
+      { route: "web_only" }
+    );
+    expect(client.forms).toHaveLength(0);
+    coordinator.decide(webOnly.approvalId, "accept");
+    await expect(webOnly.result).resolves.toMatchObject({ approved: true });
+    expect(webOnlyEffects.calls).toBe(1);
+
+    const dualEffects = new SideEffectProbe();
+    const dual = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => dualEffects.run(intent),
+      { route: "dual" }
+    );
+    await Promise.resolve();
+    expect(client.forms).toHaveLength(0);
+    expect(coordinator.get(dual.approvalId)?.state).toBe("pending");
+    clock.advance(20);
+    await expect(dual.result).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_TIMEOUT", finalState: "timed_out", sideEffects: "none" }
+    });
+    expect(dualEffects.calls).toBe(0);
+  });
+
+  it.each([
+    ["decline", "declined", undefined],
+    ["cancel", "cancelled", "cancelled"]
+  ] as const)("网页 %s 得到独立终态且副作用为零", async (action, state, reason) => {
+    const coordinator = new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      clock: new SharedFakeClock(),
+      idFactory: () => `approval-${action}`
+    });
+    const sideEffects = new SideEffectProbe();
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => sideEffects.run(intent)
+    );
+
+    expect(coordinator.decide(request.approvalId, action)).toMatchObject({
+      status: "resolved",
+      approval: { state, resolvedBy: "web" }
+    });
+    await expect(request.result).resolves.toMatchObject({
+      approved: false,
       error: {
         code: "APPROVAL_DECLINED",
-        finalState: "failed",
-        retriable: false,
         sideEffects: "none",
-        details: { reason: "disconnected" }
+        ...(reason === undefined ? {} : { details: { reason } })
       }
     });
     expect(sideEffects.calls).toBe(0);
   });
 
-  it("客户端未声明 form elicitation 时明确拒绝且不请求、不执行", async () => {
-    const client = new FakeApprovalClient(false);
-    const service = new ApprovalService(client, new FakeClock());
-    const sideEffects = new SideEffectProbe();
+  it("shutdown 结算全部 pending 并清理所有记录与期限/保留期 timer，重复调用幂等", async () => {
+    const client = new FakeApprovalClient(true);
+    const clock = new SharedFakeClock();
+    let sequence = 0;
+    const coordinator = new ApprovalCoordinator({
+      client,
+      clock,
+      resultRetentionMs: 900_000,
+      idFactory: () => `approval-shutdown-${sequence++}`
+    });
+    const acceptedEffects = new SideEffectProbe();
+    const accepted = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => acceptedEffects.run(intent),
+      { route: "web_only" }
+    );
+    coordinator.decide(accepted.approvalId, "accept");
+    await expect(accepted.result).resolves.toMatchObject({ approved: true, value: "executed" });
 
-    await expect(service.execute(createOperationIntent(approvalIntentInput()), () => sideEffects.run()))
-      .resolves.toMatchObject({
-        approved: false,
-        error: {
-          code: "APPROVAL_UNSUPPORTED",
-          finalState: "failed",
-          retriable: false,
-          sideEffects: "none"
-        }
-      });
-    expect(client.forms).toHaveLength(0);
-    expect(sideEffects.calls).toBe(0);
+    const pendingEffects = new SideEffectProbe();
+    const pending = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => pendingEffects.run(intent)
+    );
+    expect(coordinator.list()).toHaveLength(2);
+    expect(clock.activeTimerCount).toBe(2);
+
+    coordinator.shutdown();
+    await expect(pending.result).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_DECLINED", details: { reason: "disconnected" }, sideEffects: "none" }
+    });
+    expect(coordinator.list()).toEqual([]);
+    expect(clock.activeTimerCount).toBe(0);
+    expect(acceptedEffects.calls).toBe(1);
+    expect(pendingEffects.calls).toBe(0);
+
+    coordinator.shutdown();
+    expect(coordinator.list()).toEqual([]);
+    expect(clock.activeTimerCount).toBe(0);
+    const after = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      (intent) => pendingEffects.run(intent)
+    );
+    await expect(after.result).resolves.toMatchObject({
+      approved: false,
+      error: { code: "APPROVAL_DECLINED", details: { reason: "disconnected" }, sideEffects: "none" }
+    });
+    expect(pendingEffects.calls).toBe(0);
+  });
+
+  it("执行异常收敛为安全 failed 状态，不泄露原始异常或命令", async () => {
+    const secret = "never expose: rm -rf /sensitive";
+    const coordinator = new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-execution-failed"
+    });
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      () => { throw new Error(secret); },
+      { route: "web_only" }
+    );
+
+    coordinator.decide(request.approvalId, "accept");
+    const result = await request.result;
+    expect(result).toMatchObject({
+      approved: false,
+      error: { code: "STATE_UNKNOWN", finalState: "unknown", sideEffects: "possible" }
+    });
+    expect(coordinator.get(request.approvalId)).toMatchObject({ state: "failed", resolvedBy: "web" });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(coordinator.get(request.approvalId))).toContain("cat /srv/source");
+    expect(JSON.stringify(coordinator.get(request.approvalId))).not.toContain(secret);
+  });
+
+  it("resolved 仅保留 resultRetentionMs，快照深冻结且记录总量有界", async () => {
+    const clock = new SharedFakeClock();
+    let sequence = 0;
+    const coordinator = new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      clock,
+      resultRetentionMs: 30,
+      maxRecords: 1,
+      idFactory: () => `approval-retention-${sequence++}`
+    });
+    const request = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      () => "done",
+      { route: "web_only" }
+    );
+    const snapshot = coordinator.get(request.approvalId)!;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.hosts)).toBe(true);
+    expect(snapshot).not.toHaveProperty("intent");
+    expect(snapshot).not.toHaveProperty("sideEffect");
+    expect(snapshot).not.toHaveProperty("canonicalJson");
+
+    const overflow = coordinator.request(
+      createOperationIntent(approvalIntentInput()),
+      () => "never",
+      { route: "web_only" }
+    );
+    await expect(overflow.result).resolves.toMatchObject({
+      approved: false,
+      error: { code: "RESOURCE_LIMIT", sideEffects: "none" }
+    });
+    expect(coordinator.list()).toHaveLength(1);
+
+    coordinator.decide(request.approvalId, "accept");
+    await request.result;
+    clock.advance(29);
+    expect(coordinator.get(request.approvalId)).toBeDefined();
+    clock.advance(1);
+    expect(coordinator.get(request.approvalId)).toBeUndefined();
+  });
+
+  it("接受时再次核验并一次消费 Intent，重放不能产生第二次副作用", async () => {
+    const coordinator = new ApprovalCoordinator({
+      client: new FakeApprovalClient(false),
+      clock: new SharedFakeClock(),
+      idFactory: () => "approval-intent-once"
+    });
+    const intent = createOperationIntent(approvalIntentInput());
+    const sideEffects = new SideEffectProbe();
+    const first = coordinator.request(intent, (approved) => sideEffects.run(approved), { route: "web_only" });
+    coordinator.decide(first.approvalId, "accept");
+    await expect(first.result).resolves.toMatchObject({ approved: true });
+
+    const replay = coordinator.request(intent, (approved) => sideEffects.run(approved), { route: "web_only" });
+    await expect(replay.result).resolves.toMatchObject(intentMismatchResult());
+    expect(sideEffects.calls).toBe(1);
   });
 });
 
@@ -388,6 +952,7 @@ class SharedFakeClock implements Clock, MonotonicClock {
   private nextTimerId = 1;
   private readonly timers = new Map<number, { due: number; callback: () => void }>();
 
+  public get activeTimerCount(): number { return this.timers.size; }
   public now(): number { return this.nowMs; }
   public setTimeout(callback: () => void, delayMs: number): number {
     const id = this.nextTimerId++;
