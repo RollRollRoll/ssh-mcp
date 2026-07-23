@@ -13,6 +13,10 @@
 # testing
 /coverage
 
+# legacy local build caches
+/.vinext/
+/.wrangler/
+
 # misc
 .DS_Store
 *.pem
