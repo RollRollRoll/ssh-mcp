@@ -8,20 +8,23 @@ import { testWithIds } from "../test-with-ids.js";
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
 describe("禁止能力的产品入口验收", () => {
-  testWithIds(["MN-007"], "package 无额外业务 bin/MCP HTTP transport，唯一业务启动仍为 stdio", () => {
+  testWithIds(["MN-007"], "package 仅提供 stdio 可执行入口，不提供 MCP HTTP transport", () => {
     const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
-      readonly bin?: unknown;
+      readonly bin?: Readonly<Record<string, string>>;
       readonly main?: unknown;
       readonly exports?: unknown;
+      readonly private?: boolean;
       readonly scripts: Readonly<Record<string, string>>;
     };
-    expect(packageJson.bin).toBeUndefined();
+    expect(packageJson.bin).toEqual({ "ssh-mcp": "dist/index.js" });
     expect(packageJson.main).toBeUndefined();
     expect(packageJson.exports).toBeUndefined();
+    expect(packageJson.private).not.toBe(true);
     expect(Object.keys(packageJson.scripts).sort()).toEqual([
-      "build", "check", "pretest", "test", "test:acceptance", "test:contract",
+      "build", "check", "prepack", "pretest", "test", "test:acceptance", "test:contract",
       "test:integration:linux", "test:integration:windows", "typecheck"
     ]);
+    expect(readFileSync(join(root, "src/index.ts"), "utf8")).toMatch(/^#!\/usr\/bin\/env node\n/);
 
     const sources = sourceFiles(join(root, "src"));
     expect(sources.filter(({ source }) => source.includes("startServer()")))

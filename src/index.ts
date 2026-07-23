@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { startServer } from "./server.js";
 import { ErrorCodes } from "./errors/error-codes.js";
 import { JsonLogger, LogEvents } from "./observability/logger.js";

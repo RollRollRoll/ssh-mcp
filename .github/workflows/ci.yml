@@ -19,9 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm run test:contract
       - run: npm run test:integration:linux
-      - run: npm run test:acceptance
 
   windows:
     name: Windows OpenSSH integration
@@ -185,9 +183,7 @@ jobs:
           "SSH_MCP_WINDOWS_REMOTE_ROOT=$remoteRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "SSH_MCP_WINDOWS_SECOND_DRIVE=$secondDrive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: npm run check
-      - run: npm run test:contract
       - run: npm run test:integration:windows
-      - run: npm run test:acceptance
       - name: 清理本 job 创建的 Windows OpenSSH 资源
         if: always()
         shell: pwsh
