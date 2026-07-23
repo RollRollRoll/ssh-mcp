@@ -20,6 +20,7 @@ export function createDefaultConfig(configPath: string): boolean {
 export function renderDefaultConfig(workingDirectory: string): string {
   return `# SSH MCP 首次启动生成的配置模板。
 # 请先替换主机地址、用户名、认证方式和远程根目录，再重新启动。
+# 建议每个项目或安全边界使用独立配置和 trustStore；不要提交实际配置。
 version: 1
 trustStore: ${JSON.stringify(join(workingDirectory, ".ssh-mcp-trust.json"))}
 localRoots:

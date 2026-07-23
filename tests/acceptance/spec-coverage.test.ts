@@ -295,9 +295,11 @@ describe("规格覆盖验收", () => {
     expect(readme).toContain("stdio");
     expect(readme).toContain("form elicitation");
     expect(readme).toContain("非目标");
+    expect(readme).toContain("按项目或安全边界使用独立配置");
     expect(configuration).toContain("lowRiskProfiles");
     expect(configuration).toContain("TOFU");
     expect(configuration).toContain("私钥");
+    expect(configuration).toContain("每个进程只加载明确指定的一份 YAML");
     expect(configuration).not.toMatch(/BEGIN (?:OPENSSH |RSA )?PRIVATE KEY/);
   });
 });
