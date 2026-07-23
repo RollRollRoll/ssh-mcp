@@ -23,7 +23,8 @@ export const LogEvents = {
   OUTPUT_TRUNCATED: "output.truncated",
   TRANSFER_PROGRESS: "transfer.progress",
   CLEANUP_RESULT: "cleanup.result",
-  CONSOLE_READY: "console.ready"
+  CONSOLE_READY: "console.ready",
+  CONSOLE_START_FAILED: "console.start_failed"
 } as const;
 
 export type LogEvent = (typeof LogEvents)[keyof typeof LogEvents];
@@ -71,6 +72,7 @@ const safeTimeoutKinds = new Set(["connect", "command", "session", "transfer", "
 const safeTemporaryCleanupStates = new Set(["not_needed", "removed", "failed", "unknown"]);
 const safeFinalTargetCommitStates = new Set(["not_committed", "committed", "unknown"]);
 const safeCommitOutcomes = new Set(["unknown"]);
+const safeSystemErrorCodes = new Set(["EACCES", "EADDRINUSE", "EADDRNOTAVAIL", "EMFILE", "ENFILE", "EPERM"]);
 const safeNumericDetails = new Set([
   "droppedBytes", "minCursor", "transferredBytes", "aggregateTransferredBytes", "totalBytes", "completedItems", "totalItems"
 ]);
@@ -104,6 +106,9 @@ export class SecretRedactor {
       }
       if (key === "commitOutcome" && typeof detail === "string" && safeCommitOutcomes.has(detail)) {
         details.commitOutcome = detail;
+      }
+      if (key === "systemErrorCode" && typeof detail === "string" && safeSystemErrorCodes.has(detail)) {
+        details.systemErrorCode = detail;
       }
       if (safeNumericDetails.has(key) && typeof detail === "number" && Number.isSafeInteger(detail) && detail >= 0) {
         details[key] = detail;

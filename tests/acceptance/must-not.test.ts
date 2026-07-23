@@ -43,7 +43,11 @@ describe("禁止能力的产品入口验收", () => {
     expect(isAbsolute(configured)).toBe(true);
     expect(resolveConfigPath([], { SSH_MCP_CONFIG: configured })).toBe(configured);
     expect(resolveConfigPath(["--config", configured], {})).toBe(configured);
-    expect(resolveConfigPath([], {}, root)).toBe(join(root, "ssh-mcp.yml"));
+    expect(resolveConfigPath(
+      ["--config", "~/.config/ssh-mcp/ssh-mcp.yml"], {}, root, "/home/tester"
+    )).toBe("/home/tester/.config/ssh-mcp/ssh-mcp.yml");
+    expect(resolveConfigPath([], {}, root, "/home/tester"))
+      .toBe("/home/tester/.config/ssh-mcp/ssh-mcp.yml");
     expect(() => resolveConfigPath(["serve"], {})).toThrow(/仅支持 --config/);
     expect(() => resolveConfigPath(["--config", "relative.yml"], {})).toThrow(/绝对路径/);
   });
@@ -80,7 +84,8 @@ describe("禁止能力的产品入口验收", () => {
       const packageJson = readFileSync(join(root, "package.json"), "utf8");
       expect(packageJson).not.toMatch(/"(?:open|opn)"\s*:/i);
       expect(consoleSources).not.toMatch(/process\.stdout|console\.log/);
-      expect(bootstrap).toContain("logger.consoleReady(consoleInfo.accessUrl)");
+      expect(bootstrap).toContain("this.options.logger.consoleReady(info.accessUrl)");
+      expect(bootstrap).toContain("server.setToolCallGate(() => consoleLifecycle.beforeFirstToolCall())");
     });
 
   testWithIds(["LC-MN-003", "LC-MN-005", "LC-MN-006", "LC-MN-007", "LC-MN-010"],

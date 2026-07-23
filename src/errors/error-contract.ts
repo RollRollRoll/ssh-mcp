@@ -129,6 +129,8 @@ const errorMessages: Record<ErrorCode, string> = {
   CANCEL_UNCONFIRMED: "取消未确认。",
   STATE_UNKNOWN: "操作状态未知。",
   TRUST_STORE_ERROR: "信任存储错误。",
+  CONSOLE_LISTEN_DENIED: "本机控制台监听被运行环境拒绝。",
+  CONSOLE_START_FAILED: "本机控制台启动失败。",
   INTERNAL_ERROR: "内部错误。"
 };
 

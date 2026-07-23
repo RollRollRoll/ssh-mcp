@@ -175,7 +175,7 @@ flowchart LR
 
 #### `Bootstrap` / `StdioMcpServer`
 
-- 解析唯一启动参数 `--config <absolute-path>` 或环境变量 `SSH_MCP_CONFIG`；两者同时存在时启动参数优先。两者均未提供时使用当前工作目录的 `ssh-mcp.yml`；默认文件不存在则排他生成安全模板并退出，绝不覆盖已有文件。
+- 解析可选启动参数 `--config <absolute-path>` 或环境变量 `SSH_MCP_CONFIG`；两者同时存在时启动参数优先。两者均未提供时使用 `~/.config/ssh-mcp/ssh-mcp.yml`；默认文件不存在则创建父目录、排他生成安全模板并退出，绝不覆盖已有文件。
 - 加载配置成功后注册工具并连接 stdio Transport。
 - stdout 只写 MCP 帧；全部诊断写 stderr。
 - 收到进程终止信号时停止接收新操作，关闭活动通道，并在有限等待后退出。

@@ -342,6 +342,13 @@ describe("JsonLogger", () => {
     });
   });
 
+  it("启动日志只保留白名单内的系统错误码", () => {
+    const redactor = new SecretRedactor();
+
+    expect(redactor.redact({ systemErrorCode: "EPERM" })).toEqual({ systemErrorCode: "EPERM" });
+    expect(redactor.redact({ systemErrorCode: "EPERM Bearer secret" })).toEqual({});
+  });
+
   it("日志只保留已知 ID 与 allowedHosts 中的中文、下划线或空格主机名", () => {
     const lines: string[] = [];
     const logger = new JsonLogger({ write: (line) => lines.push(line) }, {

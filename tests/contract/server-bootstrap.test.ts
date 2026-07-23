@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import { JsonLogger } from "../../src/observability/logger.js";
 import type { ConsoleServerOptions } from "../../src/console/console-server.js";
 import type { StaticAssetProvider } from "../../src/console/static-assets.js";
 import { testWithIds } from "../test-with-ids.js";
+import { StartupError, startupFailureContext } from "../../src/errors/startup-error.js";
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
 const children: ReturnType<typeof spawn>[] = [];
@@ -68,18 +69,26 @@ describe("MCP stdio 启动入口", () => {
     })).toBe("/tmp/from-argument.yml");
     expect(resolveConfigPath([], { SSH_MCP_CONFIG: "/tmp/from-environment.yml" }))
       .toBe("/tmp/from-environment.yml");
-    expect(resolveStartupConfig([], {}, "/tmp/working-directory")).toEqual({
-      path: "/tmp/working-directory/ssh-mcp.yml",
+    expect(resolveStartupConfig([], {}, "/tmp/working-directory", "/home/tester")).toEqual({
+      path: "/home/tester/.config/ssh-mcp/ssh-mcp.yml",
       source: "default"
     });
+    expect(resolveConfigPath(
+      ["--config", "~/.config/ssh-mcp/ssh-mcp.yml"], {}, "/tmp/working-directory", "/home/tester"
+    )).toBe("/home/tester/.config/ssh-mcp/ssh-mcp.yml");
+    expect(resolveConfigPath(
+      [], { SSH_MCP_CONFIG: "~/.config/ssh-mcp/ssh-mcp.yml" }, "/tmp/working-directory", "/home/tester"
+    )).toBe("/home/tester/.config/ssh-mcp/ssh-mcp.yml");
     expect(() => resolveConfigPath(["--config", "relative.yml"], {})).toThrow();
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
   });
 
-  it("未指定配置时在当前目录生成模板并正常退出，第二次启动不覆盖模板", async () => {
+  it("未指定配置时在全局目录生成模板并正常退出，第二次启动不覆盖模板", async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), "ssh-mcp-bootstrap-default-"));
+    const homeDirectory = mkdtempSync(join(tmpdir(), "ssh-mcp-bootstrap-home-"));
     const inheritedEnvironment = { ...process.env };
     delete inheritedEnvironment.SSH_MCP_CONFIG;
+    inheritedEnvironment.HOME = homeDirectory;
 
     const first = spawn(process.execPath, [join(projectRoot, "dist/index.js")], {
       cwd: workingDirectory,
@@ -90,8 +99,10 @@ describe("MCP stdio 启动入口", () => {
     const firstResult = await collectProcessResult(first);
     expect(firstResult.exitCode).toBe(0);
 
-    const generatedPath = join(workingDirectory, "ssh-mcp.yml");
+    const generatedPath = join(homeDirectory, ".config", "ssh-mcp", "ssh-mcp.yml");
     expect(existsSync(generatedPath)).toBe(true);
+    expect(readFileSync(generatedPath, "utf8"))
+      .toContain(`localRoots:\n  - ${JSON.stringify(realpathSync(workingDirectory))}`);
     expect(firstResult.stderr.split("\n").filter(Boolean).map((line) => JSON.parse(line)))
       .toContainEqual(expect.objectContaining({
         level: "info", event: "config.generated", state: "completed"
@@ -172,6 +183,49 @@ describe("MCP stdio 启动入口", () => {
     const commandRunTools = (toolsList as { result: { tools: Array<{ name: string }> } }).result.tools
       .filter((tool) => tool.name === "command_run");
     expect(commandRunTools).toHaveLength(1);
+  });
+
+  testWithIds(["LC-SC-051"],
+    "首次工具调用拒绝启用或客户端不支持 Elicitation 时始终保持纯 stdio", async () => {
+    let declinedAssetLoads = 0;
+    const [declinedClientTransport, declinedServerTransport] = InMemoryTransport.createLinkedPair();
+    const declinedRuntime = await startServer(wiringConfigPath, {
+      transport: declinedServerTransport,
+      adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => undefined },
+      consoleAssetsLoader: async () => { declinedAssetLoads += 1; return memoryAssets; },
+      shutdownTimeoutMs: 20
+    });
+    const declinedClient = new Client({ name: "console-declined-test", version: "1" }, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    let prompts = 0;
+    declinedClient.setRequestHandler(ElicitRequestSchema, async () => {
+      prompts += 1;
+      return { action: "decline" as const };
+    });
+    await declinedClient.connect(declinedClientTransport);
+    await declinedClient.callTool({ name: "hosts_list", arguments: {} });
+    await declinedClient.callTool({ name: "hosts_list", arguments: {} });
+    expect(prompts).toBe(1);
+    expect(declinedAssetLoads).toBe(0);
+    await declinedClient.close();
+    await declinedRuntime.shutdown();
+
+    let unsupportedAssetLoads = 0;
+    const [unsupportedClientTransport, unsupportedServerTransport] = InMemoryTransport.createLinkedPair();
+    const unsupportedRuntime = await startServer(wiringConfigPath, {
+      transport: unsupportedServerTransport,
+      adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => undefined },
+      consoleAssetsLoader: async () => { unsupportedAssetLoads += 1; return memoryAssets; },
+      shutdownTimeoutMs: 20
+    });
+    const unsupportedClient = new Client({ name: "console-unsupported-test", version: "1" });
+    await unsupportedClient.connect(unsupportedClientTransport);
+    await unsupportedClient.callTool({ name: "hosts_list", arguments: {} });
+    await unsupportedClient.callTool({ name: "hosts_list", arguments: {} });
+    expect(unsupportedAssetLoads).toBe(0);
+    await unsupportedClient.close();
+    await unsupportedRuntime.shutdown();
   });
 
   it("顶层启动失败只向 stderr 输出单行 JSON 稳定码，不泄露原始 Error、stack 或配置路径", async () => {
@@ -270,7 +324,7 @@ describe("MCP stdio 启动入口", () => {
     let approvals = 0;
     client.setRequestHandler(ElicitRequestSchema, async () => {
       approvals += 1;
-      if (approvals <= 3) return { action: "accept" as const };
+      if (approvals <= 4) return { action: "accept" as const };
       return await new Promise<never>(() => undefined);
     });
     await client.connect(clientTransport);
@@ -310,7 +364,7 @@ describe("MCP stdio 启动入口", () => {
   });
 
   testWithIds(["LC-SC-005"],
-    "按资产、控制台 listener、MCP transport 顺序启动，运行期致命错误进入同一幂等关闭", async () => {
+    "先启动 MCP stdio，首次工具调用获准后再启动控制台，运行期致命错误进入同一幂等关闭", async () => {
     const events: string[] = [];
     let consoleOptions: ConsoleServerOptions | undefined;
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -341,9 +395,16 @@ describe("MCP stdio 启动入口", () => {
         };
       }
     });
-    expect(events.indexOf("assets")).toBeLessThan(events.indexOf("console.start"));
-    expect(events.indexOf("console.start")).toBeLessThan(events.indexOf("mcp.start"));
     expect(events.indexOf("mcp.start")).toBeLessThan(events.indexOf("log:service.started"));
+    expect(events).not.toContain("assets");
+    const client = new Client({ name: "lazy-console-test", version: "1" }, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+    await client.connect(clientTransport);
+    await client.callTool({ name: "hosts_list", arguments: {} });
+    expect(events.indexOf("log:service.started")).toBeLessThan(events.indexOf("assets"));
+    expect(events.indexOf("assets")).toBeLessThan(events.indexOf("console.start"));
     expect(events.filter((event) => event === "log:console.ready")).toHaveLength(1);
 
     consoleOptions!.onFatalError?.(new Error("listener failed"));
@@ -351,71 +412,94 @@ describe("MCP stdio 启动入口", () => {
     expect(events.filter((event) => event === "console.quiesce")).toHaveLength(1);
     expect(events.filter((event) => event === "adapter.close")).toHaveLength(1);
     expect(events.filter((event) => event === "console.close")).toHaveLength(1);
-    await clientTransport.close();
+    await client.close();
   });
 
   testWithIds(["LC-SC-003"],
-    "控制台资产、listener 或 MCP transport 启动失败会反向清理且不报告完整启动", async () => {
+    "控制台失败不阻断 stdio 且返回真实错误码，MCP transport 失败仍回滚启动", async () => {
     let factoryCalls = 0;
     let adapterShutdowns = 0;
-    const logs: string[] = [];
-    await expect(startServer(wiringConfigPath, {
-      transport: {} as never,
+    const assetLogs: string[] = [];
+    const [assetClientTransport, assetServerTransport] = InMemoryTransport.createLinkedPair();
+    const assetRuntime = await startServer(wiringConfigPath, {
+      transport: assetServerTransport,
       adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => { adapterShutdowns += 1; } },
-      logger: new JsonLogger({ write: (line) => logs.push(line) }),
+      logger: new JsonLogger({ write: (line) => assetLogs.push(line) }),
       consoleAssetsLoader: async () => { throw new Error("asset failed"); },
       consoleServerFactory: () => { factoryCalls += 1; throw new Error("不应调用"); },
       shutdownTimeoutMs: 20
-    })).rejects.toThrow("asset failed");
+    });
+    const assetClient = new Client({ name: "asset-failure-test", version: "1" }, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    assetClient.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+    await assetClient.connect(assetClientTransport);
+    const assetResult = await assetClient.callTool({ name: "hosts_list", arguments: {} });
+    expect(JSON.stringify(assetResult.content)).toContain("CONSOLE_START_FAILED");
     expect(factoryCalls).toBe(0);
+    expect(assetLogs.some((line) => line.includes("service.started"))).toBe(true);
+    expect(assetLogs.some((line) => line.includes("console.start_failed"))).toBe(true);
+    expect(assetLogs.some((line) => line.includes("console.ready"))).toBe(false);
+    await assetClient.close();
+    await assetRuntime.shutdown();
     expect(adapterShutdowns).toBe(1);
-    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
 
     const listenerEvents: string[] = [];
-    let mcpStarts = 0;
-    await expect(startServer(wiringConfigPath, {
-      transport: { start: async () => { mcpStarts += 1; } } as never,
+    const listenerLogs: string[] = [];
+    const [listenerClientTransport, listenerServerTransport] = InMemoryTransport.createLinkedPair();
+    const listenerRuntime = await startServer(wiringConfigPath, {
+      transport: listenerServerTransport,
       adapter: {
         connect: async () => { throw new Error("未调用"); },
         shutdown: () => listenerEvents.push("adapter.close")
       },
-      logger: new JsonLogger({ write: (line) => logs.push(line) }),
+      logger: new JsonLogger({ write: (line) => listenerLogs.push(line) }),
       consoleAssetsLoader: async () => memoryAssets,
       consoleServerFactory: () => ({
-        start: async () => { listenerEvents.push("console.start"); throw new Error("listener failed"); },
+        start: async () => {
+          listenerEvents.push("console.start");
+          throw Object.assign(new Error("listener failed"), { code: "EPERM" });
+        },
         quiesce: () => listenerEvents.push("console.quiesce"),
         close: async () => { listenerEvents.push("console.close"); }
       }),
       shutdownTimeoutMs: 20
-    })).rejects.toThrow("listener failed");
-    expect(mcpStarts).toBe(0);
-    expect(listenerEvents).toEqual([
-      "console.start", "console.quiesce", "adapter.close", "console.close"
-    ]);
-    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
+    });
+    const listenerClient = new Client({ name: "listener-failure-test", version: "1" }, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    listenerClient.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+    await listenerClient.connect(listenerClientTransport);
+    const listenerResult = await listenerClient.callTool({ name: "hosts_list", arguments: {} });
+    expect(JSON.stringify(listenerResult.content)).toContain("CONSOLE_LISTEN_DENIED");
+    expect(JSON.stringify(listenerResult.content)).toContain("EPERM");
+    expect(listenerEvents).toEqual(["console.start", "console.quiesce", "console.close"]);
+    expect(listenerLogs.some((line) => line.includes("service.started"))).toBe(true);
+    expect(listenerLogs.some((line) => line.includes("console.start_failed") && line.includes("EPERM"))).toBe(true);
+    expect(listenerLogs.some((line) => line.includes("console.ready"))).toBe(false);
+    await listenerClient.close();
+    await listenerRuntime.shutdown();
+    expect(listenerEvents).toContain("adapter.close");
+
+    expect(startupFailureContext(new StartupError("CONSOLE_LISTEN_DENIED", "EPERM", new Error("secret"))))
+      .toEqual({
+        state: "failed",
+        errorCode: "CONSOLE_LISTEN_DENIED",
+        details: { systemErrorCode: "EPERM" }
+      });
 
     const events: string[] = [];
+    const transportLogs: string[] = [];
     await expect(startServer(wiringConfigPath, {
       transport: { start: async () => { throw new Error("mcp failed"); } } as never,
       adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => events.push("adapter.close") },
-      logger: new JsonLogger({ write: (line) => logs.push(line) }),
-      consoleAssetsLoader: async () => memoryAssets,
-      consoleServerFactory: () => ({
-        start: async () => {
-          events.push("console.start");
-          return {
-            instanceId: "instancealpha1234", port: 43210,
-            origin: "http://instancealpha1234.localhost:43210",
-            accessUrl: `http://instancealpha1234.localhost:43210/#access_token=${"x".repeat(43)}`
-          };
-        },
-        quiesce: () => events.push("console.quiesce"),
-        close: async () => { events.push("console.close"); }
-      }),
+      logger: new JsonLogger({ write: (line) => transportLogs.push(line) }),
+      consoleAssetsLoader: async () => { events.push("assets"); return memoryAssets; },
+      consoleServerFactory: () => { events.push("console.factory"); throw new Error("不应调用"); },
       shutdownTimeoutMs: 20
     })).rejects.toThrow("mcp failed");
-    expect(events).toEqual(expect.arrayContaining(["console.start", "console.quiesce", "adapter.close", "console.close"]));
-    expect(logs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
+    expect(events).toEqual(["adapter.close"]);
+    expect(transportLogs.some((line) => line.includes("service.started") || line.includes("console.ready"))).toBe(false);
   });
 });
 

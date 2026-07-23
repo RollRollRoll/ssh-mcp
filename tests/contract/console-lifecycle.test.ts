@@ -2,7 +2,9 @@ import { request as httpRequest, type ClientRequest, type IncomingHttpHeaders } 
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonLogger } from "../../src/observability/logger.js";
 import { startServer, type ServerRuntime } from "../../src/server.js";
@@ -31,7 +33,7 @@ interface Instance {
   readonly runtime: ServerRuntime;
   readonly accessUrl: URL;
   readonly cookie: string;
-  readonly clientTransport: ReturnType<typeof InMemoryTransport.createLinkedPair>[0];
+  readonly client: Client;
 }
 
 describe("控制台实例生命周期", () => {
@@ -39,7 +41,7 @@ describe("控制台实例生命周期", () => {
   afterEach(async () => {
     await Promise.allSettled(instances.splice(0).map(async (instance) => {
       await instance.runtime.shutdown();
-      await instance.clientTransport.close();
+      await instance.client.close();
     }));
   });
 
@@ -101,6 +103,12 @@ async function startInstance(): Promise<Instance> {
     logger: new JsonLogger({ write: (line) => lines.push(line) }),
     shutdownTimeoutMs: 50
   });
+  const client = new Client({ name: "console-lifecycle-test", version: "1" }, {
+    capabilities: { elicitation: { form: {} } }
+  });
+  client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+  await client.connect(clientTransport);
+  await client.callTool({ name: "hosts_list", arguments: {} });
   const ready = lines.map((line) => JSON.parse(line) as { event: string; accessUrl?: string })
     .filter((record) => record.event === "console.ready");
   expect(ready).toHaveLength(1);
@@ -115,7 +123,7 @@ async function startInstance(): Promise<Instance> {
   });
   expect(exchange.status).toBe(204);
   const cookie = String(exchange.headers["set-cookie"]?.[0]).split(";")[0]!;
-  return { runtime, accessUrl, cookie, clientTransport };
+  return { runtime, accessUrl, cookie, client };
 }
 
 async function snapshot(instance: Instance): Promise<{

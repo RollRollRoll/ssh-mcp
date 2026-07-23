@@ -137,7 +137,8 @@ const localConsoleScenarioCoverage: Readonly<Record<string, CoverageEntry>> = {
   "达到实例资源限制": { id: "LC-SC-047", file: "contract/console-actions.test.ts" },
   "审批对话框的键盘与焦点行为": { id: "LC-SC-048", file: "web/tests/console-control.test.tsx" },
   "状态不只依赖颜色": { id: "LC-SC-049", file: "web/tests/app.test.tsx" },
-  "执行危险操作前可完整检查": { id: "LC-SC-050", file: "web/tests/console-control.test.tsx" }
+  "执行危险操作前可完整检查": { id: "LC-SC-050", file: "web/tests/console-control.test.tsx" },
+  "拒绝启用或客户端不支持询问": { id: "LC-SC-051", file: "contract/server-bootstrap.test.ts" }
 };
 
 const localConsoleMustNotCoverage: readonly CoverageEntry[] = Array.from({ length: 12 }, (_value, index) => ({
@@ -183,12 +184,12 @@ describe("规格覆盖验收", () => {
     mustNotCoverage.forEach((entry) => assertExecutableId(entry, entry.id));
   });
 
-  it("LC-COVERAGE-01：本机控制台 50 个 Scenario 均映射到唯一可执行测试 ID", () => {
+  it("LC-COVERAGE-01：本机控制台 51 个 Scenario 均映射到唯一可执行测试 ID", () => {
     const scenarios = [...readFileSync(localConsoleSpecificationPath, "utf8")
       .matchAll(/^#### Scenario：(.+)$/gm)].map((match) => match[1]!);
-    expect(scenarios).toHaveLength(50);
+    expect(scenarios).toHaveLength(51);
     expect(Object.keys(localConsoleScenarioCoverage).sort()).toEqual([...scenarios].sort());
-    expect(new Set(Object.values(localConsoleScenarioCoverage).map(({ id }) => id)).size).toBe(50);
+    expect(new Set(Object.values(localConsoleScenarioCoverage).map(({ id }) => id)).size).toBe(51);
     for (const [scenario, entry] of Object.entries(localConsoleScenarioCoverage)) assertExecutableId(entry, scenario);
   });
 
@@ -299,7 +300,7 @@ describe("规格覆盖验收", () => {
     expect(configuration).toContain("lowRiskProfiles");
     expect(configuration).toContain("TOFU");
     expect(configuration).toContain("私钥");
-    expect(configuration).toContain("每个进程只加载明确指定的一份 YAML");
+    expect(configuration).toContain("每个进程只加载默认文件或明确指定的一份 YAML");
     expect(configuration).not.toMatch(/BEGIN (?:OPENSSH |RSA )?PRIVATE KEY/);
   });
 });

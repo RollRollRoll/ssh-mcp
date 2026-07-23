@@ -1,4 +1,5 @@
 import { isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -32,7 +33,12 @@ import { ErrorCodes } from "./errors/error-codes.js";
 import { CommandApplicationService } from "./application/command-application-service.js";
 import { ProfileApplicationService } from "./application/profile-application-service.js";
 import { ConsoleAuthGuard } from "./console/console-auth-guard.js";
-import { ConsoleServer, type ConsoleServerFactory, type ConsoleServerPort } from "./console/console-server.js";
+import {
+  ConsoleServer,
+  type ConsoleServerFactory,
+  type ConsoleServerOptions,
+  type ConsoleServerPort
+} from "./console/console-server.js";
 import { loadStaticAssets, type StaticAssetProvider } from "./console/static-assets.js";
 import { RuntimeRevisionHub } from "./console/runtime-revision-hub.js";
 import { RuntimeSnapshotProjector } from "./console/runtime-snapshot-projector.js";
@@ -40,6 +46,8 @@ import { ConsoleReadRoutes } from "./console/read-routes.js";
 import { ConsoleActionRoutes } from "./console/action-routes.js";
 import { OperationControlService } from "./console/operation-control-service.js";
 import { DEFAULT_CONFIG_FILENAME } from "./config/default-config.js";
+import { consoleStartupError, startupFailureContext, type StartupError } from "./errors/startup-error.js";
+import { GatedMcpServer, type ToolCallNotice } from "./tools/gated-mcp-server.js";
 
 export interface StartupConfigResolution {
   readonly path: string;
@@ -49,31 +57,38 @@ export interface StartupConfigResolution {
 export function resolveStartupConfig(
   args: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  workingDirectory: string = process.cwd()
+  _workingDirectory: string = process.cwd(),
+  homeDirectory: string = homedir()
 ): StartupConfigResolution {
   if (args.length === 0) {
     return env.SSH_MCP_CONFIG === undefined
-      ? { path: join(workingDirectory, DEFAULT_CONFIG_FILENAME), source: "default" }
-      : { path: env.SSH_MCP_CONFIG, source: "environment" };
+      ? { path: join(homeDirectory, ".config", "ssh-mcp", DEFAULT_CONFIG_FILENAME), source: "default" }
+      : { path: expandHomePath(env.SSH_MCP_CONFIG, homeDirectory), source: "environment" };
   }
 
   if (args.length !== 2 || args[0] !== "--config") {
     throw new Error("启动入口仅支持 --config <absolute-path>");
   }
 
-  if (!isAbsolute(args[1])) {
+  const configPath = expandHomePath(args[1], homeDirectory);
+  if (!isAbsolute(configPath)) {
     throw new Error("--config 必须是绝对路径");
   }
 
-  return { path: args[1], source: "argument" };
+  return { path: configPath, source: "argument" };
 }
 
 export function resolveConfigPath(
   args: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  workingDirectory: string = process.cwd()
+  workingDirectory: string = process.cwd(),
+  homeDirectory: string = homedir()
 ): string {
-  return resolveStartupConfig(args, env, workingDirectory).path;
+  return resolveStartupConfig(args, env, workingDirectory, homeDirectory).path;
+}
+
+function expandHomePath(path: string, homeDirectory: string): string {
+  return path.startsWith("~/") ? join(homeDirectory, path.slice(2)) : path;
 }
 
 export function createServer(
@@ -83,8 +98,8 @@ export function createServer(
   profileRun?: ProfileRunDependencies,
   sessionTools?: SessionToolDependencies,
   fileTransferTools?: FileTransferToolDependencies
-): McpServer {
-  const server = new McpServer({
+): GatedMcpServer {
+  const server = new GatedMcpServer({
     name: "ssh-mcp",
     version: "0.1.0"
   });
@@ -267,39 +282,35 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
     new OperationControlService(approval.coordinator, manager)
   );
   let runtime: ActiveServerRuntime | undefined;
-  let fatalBeforeReady = false;
-  let consoleServer: ConsoleServerPort | undefined;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? config.limits.cancelConfirmationTimeoutMs;
-  try {
-    const assets = await (options.consoleAssetsLoader ?? defaultConsoleAssetsLoader)();
-    consoleServer = (options.consoleServerFactory ?? defaultConsoleServerFactory)({
-      assets,
+  const consoleLifecycle = new LazyConsoleLifecycle({
+    server,
+    logger,
+    promptTimeoutMs: config.limits.approvalTimeoutMs,
+    assetsLoader: options.consoleAssetsLoader ?? defaultConsoleAssetsLoader,
+    serverFactory: options.consoleServerFactory ?? defaultConsoleServerFactory,
+    serverOptions: {
       auth: consoleAuth,
       readRoutes,
       actionRoutes,
-      onFatalError: () => {
-        if (runtime === undefined) fatalBeforeReady = true;
-        else void runtime.shutdown().catch(() => undefined);
-      }
-    });
+      onFatalError: () => { void runtime?.shutdown().catch(() => undefined); }
+    }
+  });
+  server.setToolCallGate(() => consoleLifecycle.beforeFirstToolCall());
+  try {
     server.server.onclose = () => {
-      if (runtime === undefined) fatalBeforeReady = true;
-      else void runtime.shutdown().catch(() => undefined);
+      void runtime?.shutdown().catch(() => undefined);
     };
-    const consoleInfo = await consoleServer.start();
-    if (fatalBeforeReady) throw new Error("控制台在启动阶段失效");
     await server.connect(options.transport ?? new StdioServerTransport());
-    if (fatalBeforeReady) throw new Error("控制台在启动阶段失效");
     runtime = new ActiveServerRuntime(
       server, registry, manager, sessions, approval, adapter, logger, shutdownTimeoutMs,
-      projector, revisions, consoleServer
+      projector, revisions, consoleLifecycle
     );
-    logger.consoleReady(consoleInfo.accessUrl);
     logger.info(LogEvents.SERVICE_STARTED, { state: "active" });
     return runtime;
   } catch (error: unknown) {
     await rollbackStartup(
-      server, manager, sessions, approval, adapter, projector, revisions, consoleServer, shutdownTimeoutMs
+      server, manager, sessions, approval, adapter, projector, revisions, consoleLifecycle, shutdownTimeoutMs
     );
     throw error;
   }
@@ -319,7 +330,7 @@ class ActiveServerRuntime implements ServerRuntime {
     private readonly shutdownTimeoutMs: number,
     private readonly projector: RuntimeSnapshotProjector,
     private readonly revisions: RuntimeRevisionHub,
-    private readonly consoleServer: ConsoleServerPort
+    private readonly consoleLifecycle: LazyConsoleLifecycle
   ) {}
 
   public shutdown(): Promise<void> {
@@ -330,7 +341,7 @@ class ActiveServerRuntime implements ServerRuntime {
   private async shutdownOnce(): Promise<void> {
     let cleanupFailed = false;
     cleanupFailed = !attemptCleanup(() => this.projector.setQuiescing()) || cleanupFailed;
-    cleanupFailed = !attemptCleanup(() => this.consoleServer.quiesce()) || cleanupFailed;
+    cleanupFailed = !attemptCleanup(() => this.consoleLifecycle.quiesce()) || cleanupFailed;
     cleanupFailed = !attemptCleanup(() => this.approval.shutdown()) || cleanupFailed;
     const operationResults = await Promise.allSettled([
       this.operations.shutdown(this.shutdownTimeoutMs),
@@ -338,13 +349,108 @@ class ActiveServerRuntime implements ServerRuntime {
     ]);
     cleanupFailed = !attemptCleanup(() => this.adapter.shutdown()) || cleanupFailed;
     const mcpResults = await Promise.allSettled([bounded(this.server.close(), this.shutdownTimeoutMs)]);
-    const consoleResults = await Promise.allSettled([bounded(this.consoleServer.close(), this.shutdownTimeoutMs)]);
+    const consoleResults = await Promise.allSettled([bounded(this.consoleLifecycle.close(), this.shutdownTimeoutMs)]);
     cleanupFailed = !attemptCleanup(() => this.revisions.close()) || cleanupFailed;
     cleanupFailed = [...operationResults, ...mcpResults, ...consoleResults]
       .some((result) => result.status === "rejected") || cleanupFailed;
     this.logger.info(LogEvents.CLEANUP_RESULT, { state: cleanupFailed ? "unknown" : "completed" });
     this.logger.info(LogEvents.SERVICE_STOPPED, { state: cleanupFailed ? "unknown" : "closed" });
   }
+}
+
+interface LazyConsoleLifecycleOptions {
+  readonly server: GatedMcpServer;
+  readonly logger: JsonLogger;
+  readonly promptTimeoutMs: number;
+  readonly assetsLoader: () => Promise<StaticAssetProvider>;
+  readonly serverFactory: ConsoleServerFactory;
+  readonly serverOptions: Omit<ConsoleServerOptions, "assets">;
+}
+
+/** 默认不监听端口；只在首次工具调用得到用户同意后尝试启动控制台。 */
+class LazyConsoleLifecycle {
+  private activationPromise: Promise<ToolCallNotice | undefined> | undefined;
+  private consoleServer: ConsoleServerPort | undefined;
+  private readonly promptAbort = new AbortController();
+  private noticeDelivered = false;
+  private stopping = false;
+
+  public constructor(private readonly options: LazyConsoleLifecycleOptions) {}
+
+  public async beforeFirstToolCall(): Promise<ToolCallNotice | undefined> {
+    this.activationPromise ??= this.promptAndActivate();
+    const notice = await this.activationPromise;
+    if (notice === undefined || this.noticeDelivered) return undefined;
+    this.noticeDelivered = true;
+    return notice;
+  }
+
+  public quiesce(): void {
+    this.stopping = true;
+    this.promptAbort.abort();
+    this.consoleServer?.quiesce();
+  }
+
+  public async close(): Promise<void> {
+    await this.activationPromise?.catch(() => undefined);
+    await this.consoleServer?.close();
+  }
+
+  private async promptAndActivate(): Promise<ToolCallNotice | undefined> {
+    if (this.stopping || this.options.server.server.getClientCapabilities()?.elicitation?.form === undefined) {
+      return undefined;
+    }
+    let accepted = false;
+    try {
+      const response = await this.options.server.server.elicitInput({
+        mode: "form",
+        message: "是否启用本机 SSH MCP 网页控制台？启用后会尝试监听 127.0.0.1 的随机端口；如果运行环境禁止本地监听，SSH MCP 仍会继续通过 stdio 工作。",
+        requestedSchema: { type: "object", properties: {} }
+      }, {
+        signal: this.promptAbort.signal,
+        timeout: this.options.promptTimeoutMs,
+        maxTotalTimeout: this.options.promptTimeoutMs
+      });
+      accepted = response.action === "accept";
+    } catch {
+      return undefined;
+    }
+    if (!accepted || this.stopping) return undefined;
+
+    try {
+      const assets = await this.options.assetsLoader();
+      if (this.stopping) return undefined;
+      const consoleServer = this.options.serverFactory({ ...this.options.serverOptions, assets });
+      this.consoleServer = consoleServer;
+      const info = await consoleServer.start();
+      if (this.stopping) {
+        consoleServer.quiesce();
+        await consoleServer.close();
+        return undefined;
+      }
+      this.options.logger.consoleReady(info.accessUrl);
+      return undefined;
+    } catch (error: unknown) {
+      const startupError = consoleStartupError(error);
+      this.options.logger.error(LogEvents.CONSOLE_START_FAILED, startupFailureContext(startupError));
+      try { this.consoleServer?.quiesce(); } catch { /* 失败实例不得阻断 stdio。 */ }
+      await this.consoleServer?.close().catch(() => undefined);
+      return consoleFailureNotice(startupError);
+    }
+  }
+}
+
+function consoleFailureNotice(error: StartupError): ToolCallNotice {
+  const denied = error.errorCode === ErrorCodes.CONSOLE_LISTEN_DENIED;
+  return {
+    code: error.errorCode,
+    message: denied
+      ? "本机控制台未启动：运行环境拒绝监听 127.0.0.1。请调整 Codex 任务权限并重启 MCP；当前工具仍通过 stdio 正常执行。"
+      : "本机控制台启动失败；当前工具仍通过 stdio 正常执行。",
+    ...(error.systemErrorCode === undefined ? {} : {
+      details: { systemErrorCode: error.systemErrorCode }
+    })
+  };
 }
 
 const defaultConsoleServerFactory: ConsoleServerFactory = (options) => new ConsoleServer(options);
@@ -361,16 +467,16 @@ async function rollbackStartup(
   adapter: ConnectionTrackingSshAdapter,
   projector: RuntimeSnapshotProjector,
   revisions: RuntimeRevisionHub,
-  consoleServer: ConsoleServerPort | undefined,
+  consoleLifecycle: LazyConsoleLifecycle,
   timeoutMs: number
 ): Promise<void> {
   attemptCleanup(() => projector.setQuiescing());
-  if (consoleServer !== undefined) attemptCleanup(() => consoleServer.quiesce());
+  attemptCleanup(() => consoleLifecycle.quiesce());
   attemptCleanup(() => approval.shutdown());
   await Promise.allSettled([operations.shutdown(timeoutMs), sessions.shutdown(timeoutMs)]);
   attemptCleanup(() => adapter.shutdown());
   await Promise.allSettled([bounded(server.close(), timeoutMs)]);
-  if (consoleServer !== undefined) await Promise.allSettled([bounded(consoleServer.close(), timeoutMs)]);
+  await Promise.allSettled([bounded(consoleLifecycle.close(), timeoutMs)]);
   attemptCleanup(() => revisions.close());
 }
 

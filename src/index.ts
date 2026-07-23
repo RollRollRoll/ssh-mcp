@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { resolveStartupConfig, startServer } from "./server.js";
-import { ErrorCodes } from "./errors/error-codes.js";
 import { JsonLogger, LogEvents } from "./observability/logger.js";
 import { createDefaultConfig } from "./config/default-config.js";
+import { startupFailureContext } from "./errors/startup-error.js";
 
 export async function runMain(): Promise<void> {
   const resolution = resolveStartupConfig();
-  if (resolution.source === "default" && createDefaultConfig(resolution.path)) {
+  if (resolution.source === "default" && createDefaultConfig(resolution.path, process.cwd())) {
     startupLogger.info(LogEvents.CONFIG_GENERATED, { state: "completed" });
     return;
   }
@@ -24,7 +24,7 @@ export async function runMain(): Promise<void> {
 }
 
 const startupLogger = new JsonLogger();
-void runMain().catch(() => {
-  startupLogger.error(LogEvents.SERVICE_STOPPED, { state: "failed", errorCode: ErrorCodes.INTERNAL_ERROR });
+void runMain().catch((error: unknown) => {
+  startupLogger.error(LogEvents.SERVICE_STOPPED, startupFailureContext(error));
   process.exitCode = 1;
 });

@@ -1,11 +1,12 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const DEFAULT_CONFIG_FILENAME = "ssh-mcp.yml";
 
-export function createDefaultConfig(configPath: string): boolean {
+export function createDefaultConfig(configPath: string, localRoot = dirname(configPath)): boolean {
   try {
-    writeFileSync(configPath, renderDefaultConfig(dirname(configPath)), {
+    mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+    writeFileSync(configPath, renderDefaultConfig(localRoot), {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600
