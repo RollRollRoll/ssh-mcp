@@ -27,7 +27,7 @@ describe("禁止能力的产品入口验收", () => {
     expect(readFileSync(join(root, "src/index.ts"), "utf8")).toMatch(/^#!\/usr\/bin\/env node\n/);
 
     const sources = sourceFiles(join(root, "src"));
-    expect(sources.filter(({ source }) => source.includes("startServer()")))
+    expect(sources.filter(({ source }) => source.includes("startServer(resolution.path)")))
       .toEqual([{ file: "index.ts", source: readFileSync(join(root, "src/index.ts"), "utf8") }]);
     const combined = sources.map(({ source }) => source).join("\n");
     expect(combined.match(/new StdioServerTransport\(/g)).toHaveLength(1);
@@ -43,6 +43,7 @@ describe("禁止能力的产品入口验收", () => {
     expect(isAbsolute(configured)).toBe(true);
     expect(resolveConfigPath([], { SSH_MCP_CONFIG: configured })).toBe(configured);
     expect(resolveConfigPath(["--config", configured], {})).toBe(configured);
+    expect(resolveConfigPath([], {}, root)).toBe(join(root, "ssh-mcp.yml"));
     expect(() => resolveConfigPath(["serve"], {})).toThrow(/仅支持 --config/);
     expect(() => resolveConfigPath(["--config", "relative.yml"], {})).toThrow(/绝对路径/);
   });

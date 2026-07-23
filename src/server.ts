@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -39,13 +39,22 @@ import { RuntimeSnapshotProjector } from "./console/runtime-snapshot-projector.j
 import { ConsoleReadRoutes } from "./console/read-routes.js";
 import { ConsoleActionRoutes } from "./console/action-routes.js";
 import { OperationControlService } from "./console/operation-control-service.js";
+import { DEFAULT_CONFIG_FILENAME } from "./config/default-config.js";
 
-export function resolveConfigPath(
+export interface StartupConfigResolution {
+  readonly path: string;
+  readonly source: "argument" | "environment" | "default";
+}
+
+export function resolveStartupConfig(
   args: string[] = process.argv.slice(2),
-  env: NodeJS.ProcessEnv = process.env
-): string | undefined {
+  env: NodeJS.ProcessEnv = process.env,
+  workingDirectory: string = process.cwd()
+): StartupConfigResolution {
   if (args.length === 0) {
-    return env.SSH_MCP_CONFIG;
+    return env.SSH_MCP_CONFIG === undefined
+      ? { path: join(workingDirectory, DEFAULT_CONFIG_FILENAME), source: "default" }
+      : { path: env.SSH_MCP_CONFIG, source: "environment" };
   }
 
   if (args.length !== 2 || args[0] !== "--config") {
@@ -56,7 +65,15 @@ export function resolveConfigPath(
     throw new Error("--config 必须是绝对路径");
   }
 
-  return args[1];
+  return { path: args[1], source: "argument" };
+}
+
+export function resolveConfigPath(
+  args: string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env,
+  workingDirectory: string = process.cwd()
+): string {
+  return resolveStartupConfig(args, env, workingDirectory).path;
 }
 
 export function createServer(
@@ -94,9 +111,6 @@ export interface ServerRuntime {
 }
 
 export async function startServer(configPath = resolveConfigPath(), options: StartServerOptions = {}): Promise<ServerRuntime> {
-  if (configPath === undefined) {
-    throw new Error("启动服务需要 --config <absolute-path> 或 SSH_MCP_CONFIG");
-  }
   let config: ReturnType<ConfigLoader["load"]>;
   try {
     config = new ConfigLoader(configPath).load();

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { createServer, resolveConfigPath, startServer } from "../../src/server.js";
+import { createServer, resolveConfigPath, resolveStartupConfig, startServer } from "../../src/server.js";
 import { JsonLogger } from "../../src/observability/logger.js";
 import type { ConsoleServerOptions } from "../../src/console/console-server.js";
 import type { StaticAssetProvider } from "../../src/console/static-assets.js";
@@ -68,8 +68,45 @@ describe("MCP stdio 启动入口", () => {
     })).toBe("/tmp/from-argument.yml");
     expect(resolveConfigPath([], { SSH_MCP_CONFIG: "/tmp/from-environment.yml" }))
       .toBe("/tmp/from-environment.yml");
+    expect(resolveStartupConfig([], {}, "/tmp/working-directory")).toEqual({
+      path: "/tmp/working-directory/ssh-mcp.yml",
+      source: "default"
+    });
     expect(() => resolveConfigPath(["--config", "relative.yml"], {})).toThrow();
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
+  });
+
+  it("未指定配置时在当前目录生成模板并正常退出，第二次启动不覆盖模板", async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), "ssh-mcp-bootstrap-default-"));
+    const inheritedEnvironment = { ...process.env };
+    delete inheritedEnvironment.SSH_MCP_CONFIG;
+
+    const first = spawn(process.execPath, [join(projectRoot, "dist/index.js")], {
+      cwd: workingDirectory,
+      env: inheritedEnvironment,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    children.push(first);
+    const firstResult = await collectProcessResult(first);
+    expect(firstResult.exitCode).toBe(0);
+
+    const generatedPath = join(workingDirectory, "ssh-mcp.yml");
+    expect(existsSync(generatedPath)).toBe(true);
+    expect(firstResult.stderr.split("\n").filter(Boolean).map((line) => JSON.parse(line)))
+      .toContainEqual(expect.objectContaining({
+        level: "info", event: "config.generated", state: "completed"
+      }));
+
+    const marker = "# 用户已编辑\n";
+    writeFileSync(generatedPath, `${marker}${readFileSync(generatedPath, "utf8")}`);
+    const second = spawn(process.execPath, [join(projectRoot, "dist/index.js")], {
+      cwd: workingDirectory,
+      env: inheritedEnvironment,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    children.push(second);
+    await collectStderrEvents(second, "service.started");
+    expect(readFileSync(generatedPath, "utf8")).toMatch(new RegExp(`^${marker}`));
   });
 
   testWithIds(["LC-AC-009"], "成功加载配置后完成初始化并注册基础工具，stdout 仅输出 MCP 帧", async () => {
@@ -436,6 +473,19 @@ function collectOneStderrLine(child: ReturnType<typeof spawn>): Promise<string> 
       if (newline < 0) return;
       clearTimeout(timer);
       resolve(buffer.slice(0, newline));
+    });
+  });
+}
+
+function collectProcessResult(child: ReturnType<typeof spawn>): Promise<{ readonly exitCode: number | null; readonly stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    const timer = setTimeout(() => reject(new Error("进程未在超时时间内退出")), 5_000);
+    child.once("error", reject);
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once("exit", (exitCode) => {
+      clearTimeout(timer);
+      resolve({ exitCode, stderr });
     });
   });
 }

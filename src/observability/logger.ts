@@ -13,6 +13,7 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 export const LogEvents = {
   SERVICE_STARTED: "service.started",
   SERVICE_STOPPED: "service.stopped",
+  CONFIG_GENERATED: "config.generated",
   CONFIG_LOADED: "config.loaded",
   APPROVAL_RESULT: "approval.result",
   OPERATION_APPROVAL: "operation.approval",
