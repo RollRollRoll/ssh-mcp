@@ -1,4 +1,18 @@
 dist/
 node_modules/
+.execute-task/
 .serena/
 .ssh-mcp/
+
+# 本地配置与凭据
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
+ssh-mcp.yml
+
+# 日志、发布归档与系统文件
+*.log
+*.tgz
+.DS_Store
