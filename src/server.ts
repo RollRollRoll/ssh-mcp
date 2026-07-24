@@ -103,6 +103,8 @@ export function createServer(
   const server = new GatedMcpServer({
     name: "ssh-mcp",
     version: "0.1.0"
+  }, {
+    instructions: "当工具结果包含 _sshMcp.console.accessUrl 时，必须把完整 URL 作为可点击链接提供给用户；该地址是当前本机控制台的一次性入口，不要改写为远端主机地址，也不要扫描远端 Web 端口。"
   });
 
   registerTools(server, registry, operationManager, commandRun, profileRun, sessionTools, fileTransferTools);
@@ -430,8 +432,7 @@ class LazyConsoleLifecycle {
         return undefined;
       }
       this.options.logger.consoleReady(info.accessUrl);
-      await this.offerConsoleAccess(info);
-      return undefined;
+      return await this.offerConsoleAccess(info) ? undefined : consoleReadyNotice(info);
     } catch (error: unknown) {
       const startupError = consoleStartupError(error);
       this.options.logger.error(LogEvents.CONSOLE_START_FAILED, startupFailureContext(startupError));
@@ -441,9 +442,9 @@ class LazyConsoleLifecycle {
     }
   }
 
-  private async offerConsoleAccess(info: ConsoleServerInfo): Promise<void> {
+  private async offerConsoleAccess(info: ConsoleServerInfo): Promise<boolean> {
     if (this.stopping
-      || this.options.server.server.getClientCapabilities()?.elicitation?.url === undefined) return;
+      || this.options.server.server.getClientCapabilities()?.elicitation?.url === undefined) return false;
     try {
       await this.options.server.server.elicitInput({
         mode: "url",
@@ -455,15 +456,26 @@ class LazyConsoleLifecycle {
         timeout: this.options.promptTimeoutMs,
         maxTotalTimeout: this.options.promptTimeoutMs
       });
+      return true;
     } catch {
       // 客户端拒绝、取消或无法呈现 URL 时，控制台和 stdio 仍保持可用。
+      return false;
     }
   }
+}
+
+function consoleReadyNotice(info: ConsoleServerInfo): ToolCallNotice {
+  return {
+    type: "console_ready",
+    message: "SSH MCP 本机控制台已就绪。请在本机可信浏览器中打开此一次性地址；不要分享或持久化。",
+    accessUrl: info.accessUrl
+  };
 }
 
 function consoleFailureNotice(error: StartupError): ToolCallNotice {
   const denied = error.errorCode === ErrorCodes.CONSOLE_LISTEN_DENIED;
   return {
+    type: "warning",
     code: error.errorCode,
     message: denied
       ? "本机控制台未启动：运行环境拒绝监听 127.0.0.1。请调整 Codex 任务权限并重启 MCP；当前工具仍通过 stdio 正常执行。"
