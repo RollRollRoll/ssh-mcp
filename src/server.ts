@@ -36,6 +36,7 @@ import { ConsoleAuthGuard } from "./console/console-auth-guard.js";
 import {
   ConsoleServer,
   type ConsoleServerFactory,
+  type ConsoleServerInfo,
   type ConsoleServerOptions,
   type ConsoleServerPort
 } from "./console/console-server.js";
@@ -404,7 +405,7 @@ class LazyConsoleLifecycle {
     try {
       const response = await this.options.server.server.elicitInput({
         mode: "form",
-        message: "是否启用本机 SSH MCP 网页控制台？启用后会尝试监听 127.0.0.1 的随机端口；如果运行环境禁止本地监听，SSH MCP 仍会继续通过 stdio 工作。",
+        message: "是否启用本机 SSH MCP 网页控制台？启用后会尝试监听 127.0.0.1 的随机端口；客户端支持安全 URL 导航时会再提示你在浏览器中打开。如果运行环境禁止本地监听，SSH MCP 仍会继续通过 stdio 工作。",
         requestedSchema: { type: "object", properties: {} }
       }, {
         signal: this.promptAbort.signal,
@@ -429,6 +430,7 @@ class LazyConsoleLifecycle {
         return undefined;
       }
       this.options.logger.consoleReady(info.accessUrl);
+      await this.offerConsoleAccess(info);
       return undefined;
     } catch (error: unknown) {
       const startupError = consoleStartupError(error);
@@ -436,6 +438,25 @@ class LazyConsoleLifecycle {
       try { this.consoleServer?.quiesce(); } catch { /* 失败实例不得阻断 stdio。 */ }
       await this.consoleServer?.close().catch(() => undefined);
       return consoleFailureNotice(startupError);
+    }
+  }
+
+  private async offerConsoleAccess(info: ConsoleServerInfo): Promise<void> {
+    if (this.stopping
+      || this.options.server.server.getClientCapabilities()?.elicitation?.url === undefined) return;
+    try {
+      await this.options.server.server.elicitInput({
+        mode: "url",
+        message: "SSH MCP 本机控制台已就绪。是否在本机浏览器中打开？该地址包含当前实例的一次性访问凭证，请勿分享或保存。",
+        url: info.accessUrl,
+        elicitationId: info.instanceId
+      }, {
+        signal: this.promptAbort.signal,
+        timeout: this.options.promptTimeoutMs,
+        maxTotalTimeout: this.options.promptTimeoutMs
+      });
+    } catch {
+      // 客户端拒绝、取消或无法呈现 URL 时，控制台和 stdio 仍保持可用。
     }
   }
 }

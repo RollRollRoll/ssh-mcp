@@ -103,16 +103,22 @@ async function startInstance(): Promise<Instance> {
     logger: new JsonLogger({ write: (line) => lines.push(line) }),
     shutdownTimeoutMs: 50
   });
+  let offeredUrl: string | undefined;
   const client = new Client({ name: "console-lifecycle-test", version: "1" }, {
-    capabilities: { elicitation: { form: {} } }
+    capabilities: { elicitation: { form: {}, url: {} } }
   });
-  client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+  client.setRequestHandler(ElicitRequestSchema, async (request) => {
+    if (request.params.mode === "url") offeredUrl = request.params.url;
+    return { action: "accept" as const };
+  });
   await client.connect(clientTransport);
-  await client.callTool({ name: "hosts_list", arguments: {} });
+  const toolResult = await client.callTool({ name: "hosts_list", arguments: {} });
   const ready = lines.map((line) => JSON.parse(line) as { event: string; accessUrl?: string })
     .filter((record) => record.event === "console.ready");
   expect(ready).toHaveLength(1);
   const accessUrl = new URL(ready[0]!.accessUrl!);
+  expect(offeredUrl).toBe(accessUrl.href);
+  expect(JSON.stringify(toolResult)).not.toContain("access_token");
   const token = new URLSearchParams(accessUrl.hash.slice(1)).get("access_token")!;
   const exchange = await send(Number(accessUrl.port), {
     method: "POST", path: "/api/v1/session", host: accessUrl.host,

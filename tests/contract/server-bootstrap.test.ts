@@ -397,15 +397,21 @@ describe("MCP stdio 启动入口", () => {
     });
     expect(events.indexOf("mcp.start")).toBeLessThan(events.indexOf("log:service.started"));
     expect(events).not.toContain("assets");
+    let offeredUrl: string | undefined;
     const client = new Client({ name: "lazy-console-test", version: "1" }, {
-      capabilities: { elicitation: { form: {} } }
+      capabilities: { elicitation: { form: {}, url: {} } }
     });
-    client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept" as const }));
+    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode === "url") offeredUrl = request.params.url;
+      return { action: "accept" as const };
+    });
     await client.connect(clientTransport);
-    await client.callTool({ name: "hosts_list", arguments: {} });
+    const toolResult = await client.callTool({ name: "hosts_list", arguments: {} });
     expect(events.indexOf("log:service.started")).toBeLessThan(events.indexOf("assets"));
     expect(events.indexOf("assets")).toBeLessThan(events.indexOf("console.start"));
     expect(events.filter((event) => event === "log:console.ready")).toHaveLength(1);
+    expect(offeredUrl).toBe(`http://${consoleOptions!.auth!.instanceId}.localhost:43210/#access_token=${"x".repeat(43)}`);
+    expect(JSON.stringify(toolResult)).not.toContain("access_token");
 
     consoleOptions!.onFatalError?.(new Error("listener failed"));
     await runtime.shutdown();
