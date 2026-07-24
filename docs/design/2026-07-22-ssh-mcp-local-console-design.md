@@ -186,7 +186,7 @@ flowchart LR
 2. 连接 MCP `stdio` transport，写入 `service.started`；此时不加载前端资产、不建立 HTTP listener。
 3. 首次合法工具调用通过进程级 gate 检查客户端 form elicitation 能力，并只询问一次是否启用控制台。
 4. 用户接受后才加载资产、生成实例 ID 与访问 token，并由 `ConsoleServer` 在 `127.0.0.1:0` 建立 listener。
-5. 控制台可用后写入一次性的 `console.ready`；客户端支持 URL elicitation 时，再通过标准协议请求客户端向用户呈现导航确认，用户接受后由客户端打开页面。客户端未声明 URL elicitation 或导航请求失败时，进程级 gate 把同一个一次性地址写入首次工具 structuredContent 的 `_sshMcp.console.accessUrl`；server instructions 要求客户端把它展示为链接。
+5. 控制台可用后写入一次性的 `console.ready`；客户端支持 URL elicitation 时，再通过标准协议请求客户端向用户呈现导航确认，只有用户接受后才视为交付成功并由客户端打开页面。客户端未声明 URL elicitation、拒绝或取消导航，或导航请求失败时，进程级 gate 把同一个一次性地址写入首次工具首个文本块和 structuredContent 的 `_sshMcp.console.accessUrl`；server instructions 要求客户端把它展示为链接。
 6. 控制台激活失败只产生稳定告警并附加到首次工具文本结果，不回滚或中断已可用的 MCP `stdio`。
 
 关闭顺序：

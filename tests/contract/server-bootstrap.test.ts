@@ -411,6 +411,10 @@ describe("MCP stdio 启动入口", () => {
     expect(events.indexOf("log:service.started")).toBeLessThan(events.indexOf("assets"));
     expect(events.indexOf("assets")).toBeLessThan(events.indexOf("console.start"));
     expect(events.filter((event) => event === "log:console.ready")).toHaveLength(1);
+    expect(toolResult.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining(`http://${consoleOptions!.auth!.instanceId}.localhost:43210/#access_token=${"x".repeat(43)}`)
+    });
     expect(toolResult.structuredContent).toMatchObject({
       _sshMcp: {
         console: {
@@ -426,6 +430,44 @@ describe("MCP stdio 启动入口", () => {
     expect(events.filter((event) => event === "adapter.close")).toHaveLength(1);
     expect(events.filter((event) => event === "console.close")).toHaveLength(1);
     await client.close();
+  });
+
+  it("URL elicitation 被拒绝时通过首次工具结果回退控制台地址", async () => {
+    let consoleOptions: ConsoleServerOptions | undefined;
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const runtime = await startServer(wiringConfigPath, {
+      transport: serverTransport,
+      adapter: { connect: async () => { throw new Error("未调用"); }, shutdown: () => undefined },
+      consoleAssetsLoader: async () => memoryAssets,
+      consoleServerFactory: (options) => {
+        consoleOptions = options;
+        return {
+          start: async () => ({
+            instanceId: options.auth!.instanceId,
+            port: 43211,
+            origin: `http://${options.auth!.instanceId}.localhost:43211`,
+            accessUrl: `http://${options.auth!.instanceId}.localhost:43211/#access_token=${"y".repeat(43)}`
+          }),
+          quiesce: () => undefined,
+          close: async () => undefined
+        };
+      }
+    });
+    const client = new Client({ name: "url-declined-test", version: "1" }, {
+      capabilities: { elicitation: { form: {}, url: {} } }
+    });
+    client.setRequestHandler(ElicitRequestSchema, async (request) => ({
+      action: request.params.mode === "form" ? "accept" as const : "decline" as const
+    }));
+    await client.connect(clientTransport);
+    const toolResult = await client.callTool({ name: "hosts_list", arguments: {} });
+    const expectedUrl = `http://${consoleOptions!.auth!.instanceId}.localhost:43211/#access_token=${"y".repeat(43)}`;
+    expect(toolResult.content[0]).toMatchObject({ type: "text", text: expect.stringContaining(expectedUrl) });
+    expect(toolResult.structuredContent).toMatchObject({
+      _sshMcp: { console: { state: "ready", accessUrl: expectedUrl } }
+    });
+    await client.close();
+    await runtime.shutdown();
   });
 
   testWithIds(["LC-SC-003"],

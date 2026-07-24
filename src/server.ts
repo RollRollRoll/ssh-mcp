@@ -446,7 +446,7 @@ class LazyConsoleLifecycle {
     if (this.stopping
       || this.options.server.server.getClientCapabilities()?.elicitation?.url === undefined) return false;
     try {
-      await this.options.server.server.elicitInput({
+      const response = await this.options.server.server.elicitInput({
         mode: "url",
         message: "SSH MCP 本机控制台已就绪。是否在本机浏览器中打开？该地址包含当前实例的一次性访问凭证，请勿分享或保存。",
         url: info.accessUrl,
@@ -456,7 +456,7 @@ class LazyConsoleLifecycle {
         timeout: this.options.promptTimeoutMs,
         maxTotalTimeout: this.options.promptTimeoutMs
       });
-      return true;
+      return response.action === "accept";
     } catch {
       // 客户端拒绝、取消或无法呈现 URL 时，控制台和 stdio 仍保持可用。
       return false;

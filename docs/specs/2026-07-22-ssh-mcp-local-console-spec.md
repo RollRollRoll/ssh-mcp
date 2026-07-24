@@ -81,7 +81,7 @@
 - THEN 系统 MUST 在不重启 MCP 的情况下尝试使该实例的本机控制台进入可用状态
 - AND MUST 在诊断输出中给出该实例唯一的控制台访问地址
 - AND 客户端声明支持 URL elicitation 时，系统 MUST 再请求客户端向用户呈现一次该地址的导航确认，并只在用户接受后由客户端打开
-- AND 客户端未声明 URL elicitation 或导航请求失败时，系统 MUST 把同一个一次性地址附加到首次工具结果的 structuredContent，并通过 server instructions 要求客户端向用户展示可点击链接
+- AND 客户端未声明 URL elicitation、拒绝或取消导航，或导航请求失败时，系统 MUST 把同一个一次性地址附加到首次工具结果的首个文本块和 structuredContent，并通过 server instructions 要求客户端向用户展示可点击链接
 - AND 访问地址 MUST 对应当前实例，不能展示或控制其他实例
 
 #### Scenario：多个实例同时运行

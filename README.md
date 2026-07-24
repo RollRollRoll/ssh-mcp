@@ -91,7 +91,7 @@ node dist/index.js
 {"level":"info","event":"console.ready","state":"active","accessUrl":"http://<随机实例>.localhost:<随机端口>/#access_token=<一次性令牌>"}
 ```
 
-客户端同时支持 MCP URL elicitation 时，控制台就绪后会再显示一次安全导航确认；用户接受后由客户端在本机浏览器打开完整地址。客户端只支持 form elicitation 或 URL 导航请求失败时，首次工具结果的 `_sshMcp.console.accessUrl` 会提供同一个一次性地址，客户端应把它展示为可点击链接；`console.ready` 仍保留诊断入口。SSH MCP 服务端不会调用系统 `open` 命令。每个启用控制台的进程使用不同的随机回环端口、实例 Origin 和凭证；进程退出后旧地址失效。
+客户端同时支持 MCP URL elicitation 时，控制台就绪后会再显示一次安全导航确认；只有用户接受后才视为交付成功，并由客户端在本机浏览器打开完整地址。客户端只支持 form elicitation、拒绝或取消 URL 导航，或导航请求失败时，首次工具结果的首个文本块和 structuredContent 会通过 `_sshMcp.console.accessUrl` 提供同一个一次性地址，客户端应把它展示为可点击链接；`console.ready` 仍保留诊断入口。SSH MCP 服务端不会调用系统 `open` 命令。每个启用控制台的进程使用不同的随机回环端口、实例 Origin 和凭证；进程退出后旧地址失效。
 
 MCP Elicitation 只能取得用户对启用控制台的同意，不能提升 Codex 宿主进程的沙箱权限。如果监听被拒绝，首次工具结果会附加 `CONSOLE_LISTEN_DENIED` 告警及安全白名单内的系统错误码（例如 `EPERM`），原工具仍继续通过 `stdio` 执行。请调整任务权限后重启 MCP；服务不会自行绕过沙箱。
 

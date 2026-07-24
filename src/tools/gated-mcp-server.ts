@@ -79,8 +79,8 @@ function appendNotice(result: CallToolResult, notice: ToolCallNotice): CallToolR
   return {
     ...result,
     content: [
-      ...(result.content ?? []),
-      { type: "text", text: JSON.stringify({ _sshMcp: envelope }) }
+      { type: "text", text: JSON.stringify({ _sshMcp: envelope }) },
+      ...(result.content ?? [])
     ],
     ...(result.structuredContent === undefined ? {} : {
       structuredContent: { ...result.structuredContent, _sshMcp: envelope }
