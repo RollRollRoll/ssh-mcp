@@ -9,7 +9,6 @@ export async function runMain(): Promise<void> {
   const resolution = resolveStartupConfig();
   if (resolution.source === "default" && createDefaultConfig(resolution.path, process.cwd())) {
     startupLogger.info(LogEvents.CONFIG_GENERATED, { state: "completed" });
-    return;
   }
 
   const runtime = await startServer(resolution.path);

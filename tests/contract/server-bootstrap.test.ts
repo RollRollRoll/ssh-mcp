@@ -83,7 +83,7 @@ describe("MCP stdio 启动入口", () => {
     expect(() => resolveConfigPath(["--host", "example.test"], {})).toThrow();
   });
 
-  it("未指定配置时在全局目录生成模板并正常退出，第二次启动不覆盖模板", async () => {
+  it("未指定配置时生成模板并在同一次启动完成 MCP 握手，后续启动不覆盖模板", async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), "ssh-mcp-bootstrap-default-"));
     const homeDirectory = mkdtempSync(join(tmpdir(), "ssh-mcp-bootstrap-home-"));
     const inheritedEnvironment = { ...process.env };
@@ -93,20 +93,34 @@ describe("MCP stdio 启动入口", () => {
     const first = spawn(process.execPath, [join(projectRoot, "dist/index.js")], {
       cwd: workingDirectory,
       env: inheritedEnvironment,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"]
     });
     children.push(first);
-    const firstResult = await collectProcessResult(first);
-    expect(firstResult.exitCode).toBe(0);
+    const firstEvents = collectStderrEvents(first, "service.started");
+    const firstResponses = collectJsonLines(first, 1);
+    first.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "first-start-test", version: "1.0.0" }
+      }
+    })}\n`);
+    await expect(firstResponses).resolves.toEqual([
+      expect.objectContaining({ id: 1, result: expect.objectContaining({ protocolVersion: "2025-11-25" }) })
+    ]);
+    await expect(firstEvents).resolves.toEqual(expect.arrayContaining(["config.generated", "service.started"]));
 
     const generatedPath = join(homeDirectory, ".config", "ssh-mcp", "ssh-mcp.yml");
     expect(existsSync(generatedPath)).toBe(true);
     expect(readFileSync(generatedPath, "utf8"))
       .toContain(`localRoots:\n  - ${JSON.stringify(realpathSync(workingDirectory))}`);
-    expect(firstResult.stderr.split("\n").filter(Boolean).map((line) => JSON.parse(line)))
-      .toContainEqual(expect.objectContaining({
-        level: "info", event: "config.generated", state: "completed"
-      }));
+
+    const firstExited = new Promise<void>((resolve) => { first.once("exit", () => resolve()); });
+    first.kill("SIGTERM");
+    await firstExited;
 
     const marker = "# 用户已编辑\n";
     writeFileSync(generatedPath, `${marker}${readFileSync(generatedPath, "utf8")}`);
@@ -612,19 +626,6 @@ function collectOneStderrLine(child: ReturnType<typeof spawn>): Promise<string> 
       if (newline < 0) return;
       clearTimeout(timer);
       resolve(buffer.slice(0, newline));
-    });
-  });
-}
-
-function collectProcessResult(child: ReturnType<typeof spawn>): Promise<{ readonly exitCode: number | null; readonly stderr: string }> {
-  return new Promise((resolve, reject) => {
-    let stderr = "";
-    const timer = setTimeout(() => reject(new Error("进程未在超时时间内退出")), 5_000);
-    child.once("error", reject);
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.once("exit", (exitCode) => {
-      clearTimeout(timer);
-      resolve({ exitCode, stderr });
     });
   });
 }
