@@ -18,7 +18,7 @@ SSH MCP 是一个通过 MCP `stdio` Transport 提供 SSH 操作的服务。进�
   "args": [
     "--yes",
     "--package",
-    "@rollrollroll/ssh-mcp@0.1.6",
+    "@rollrollroll/ssh-mcp@0.1.7",
     "ssh-mcp"
   ]
 }
@@ -29,7 +29,7 @@ SSH MCP 是一个通过 MCP `stdio` Transport 提供 SSH 操作的服务。进�
 - 启动命令：`npx`
 - 参数 1：`--yes`
 - 参数 2：`--package`
-- 参数 3：`@rollrollroll/ssh-mcp@0.1.6`
+- 参数 3：`@rollrollroll/ssh-mcp@0.1.7`
 - 参数 4：`ssh-mcp`
 
 无参数时固定加载部署机器上的全局配置 `~/.config/ssh-mcp/ssh-mcp.yml`，不受 MCP 客户端工作目录影响。只有需要使用其他配置文件时，才传入 `--config <path>` 或设置 `SSH_MCP_CONFIG`。两者接受绝对路径，也接受以 `~/` 开头的当前服务用户主目录路径；服务只展开开头的 `~/`，不会进行 Shell 变量、命令或通配符展开。
@@ -57,7 +57,7 @@ npm publish --access public
   "args": [
     "--yes",
     "--package",
-    "@rollrollroll/ssh-mcp@0.1.6",
+    "@rollrollroll/ssh-mcp@0.1.7",
     "ssh-mcp"
   ]
 }
