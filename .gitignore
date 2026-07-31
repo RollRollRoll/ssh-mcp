@@ -16,3 +16,4 @@ ssh-mcp.yml
 *.log
 *.tgz
 .DS_Store
+.git-relay.conf
