@@ -6,7 +6,7 @@ export const DEFAULT_CONFIG_FILENAME = "ssh-mcp.yml";
 export function createDefaultConfig(configPath: string, localRoot = dirname(configPath)): boolean {
   try {
     mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-    writeFileSync(configPath, renderDefaultConfig(localRoot), {
+    writeFileSync(configPath, renderDefaultConfig(localRoot, dirname(configPath)), {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600
@@ -18,12 +18,12 @@ export function createDefaultConfig(configPath: string, localRoot = dirname(conf
   }
 }
 
-export function renderDefaultConfig(workingDirectory: string): string {
+export function renderDefaultConfig(workingDirectory: string, configDirectory = workingDirectory): string {
   return `# SSH MCP 首次启动生成的配置模板。
-# 请先替换主机地址、用户名、认证方式和远程根目录，再重新启动。
+# 请先替换主机地址、用户名、认证方式和远程根目录，再调用 config_reload。
 # 建议每个项目或安全边界使用独立配置和 trustStore；不要提交实际配置。
 version: 1
-trustStore: ${JSON.stringify(join(workingDirectory, ".ssh-mcp-trust.json"))}
+trustStore: ${JSON.stringify(join(configDirectory, "trust.json"))}
 localRoots:
   - ${JSON.stringify(workingDirectory)}
 hosts:

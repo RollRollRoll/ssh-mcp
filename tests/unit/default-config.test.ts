@@ -15,6 +15,7 @@ describe("默认配置生成", () => {
     expect(generated).toContain("每个项目或安全边界使用独立配置和 trustStore");
     expect(loadConfigFromYaml(generated)).toMatchObject({
       version: 1,
+      trustStore: join(workingDirectory, ".config", "ssh-mcp", "trust.json"),
       localRoots: [workingDirectory],
       hosts: [{
         alias: "example-development",

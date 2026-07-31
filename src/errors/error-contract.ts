@@ -92,6 +92,7 @@ const errorMessages: Record<ErrorCode, string> = {
   INVALID_ARGUMENT: "请求参数无效。",
   INVALID_CURSOR: "游标无效。",
   CONFIG_INVALID: "配置无效。",
+  CONFIG_RESTART_REQUIRED: "配置包含需要重启服务才能生效的变更。",
   CONFIG_VERSION_UNSUPPORTED: "配置版本不受支持。",
   RESOURCE_LIMIT: "资源限制已触发。",
   HOST_NOT_REGISTERED: "主机未注册。",

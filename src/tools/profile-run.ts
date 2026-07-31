@@ -41,7 +41,7 @@ export interface ProfileRunDependencies {
   readonly application?: ProfileApplicationService;
 }
 
-/** Profile 只能完整命中启动时规则；拒绝时不创建操作、不连接且不进入审批路径。 */
+/** Profile 只能完整命中当前已装载规则；拒绝时不创建操作、不连接且不进入审批路径。 */
 export function registerProfileRunTool(server: McpServer, dependencies: ProfileRunDependencies): void {
   const application = dependencies.application ?? new ProfileApplicationService(
     dependencies.registry,

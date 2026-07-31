@@ -38,6 +38,20 @@ export class ConfigLoader {
       throw this.failure;
     }
   }
+
+  /** 重新读取配置；失败时保留上一次成功加载的快照，便于修正后再次重试。 */
+  public reload(): SshMcpConfig {
+    try {
+      const reloaded = loadConfigFromYaml(this.readConfig(this.configPath));
+      this.loaded = reloaded;
+      this.failure = undefined;
+      return reloaded;
+    } catch (error: unknown) {
+      throw error instanceof ConfigError
+        ? error
+        : new ConfigError(`无法读取 ${this.configPath}`, { cause: error });
+    }
+  }
 }
 
 export function loadConfigFromYaml(source: string, homeDirectory = homedir()): SshMcpConfig {

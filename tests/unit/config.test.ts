@@ -111,6 +111,30 @@ lowRiskProfiles:
     expect(reads).toBe(1);
   });
 
+  it("显式重载会重新读取，失败时保留上一次成功快照且可继续重试", () => {
+    let source = baseConfig;
+    let reads = 0;
+    const loader = new ConfigLoader("/unused.yml", () => {
+      reads += 1;
+      return source;
+    });
+
+    const initial = loader.load();
+    source = baseConfig.replaceAll("linux-dev", "reloaded-host");
+    const reloaded = loader.reload();
+    expect(reloaded.hosts[0]?.alias).toBe("reloaded-host");
+    expect(loader.load()).toBe(reloaded);
+
+    source = "version: [invalid";
+    expect(() => loader.reload()).toThrow(/配置无效/);
+    expect(loader.load()).toBe(reloaded);
+
+    source = baseConfig.replaceAll("linux-dev", "retried-host");
+    expect(loader.reload().hosts[0]?.alias).toBe("retried-host");
+    expect(initial.hosts[0]?.alias).toBe("linux-dev");
+    expect(reads).toBe(4);
+  });
+
   it("把 ~/.ssh 下的私钥路径展开为服务进程用户的绝对路径", () => {
     const source = baseConfig.replace(
       "type: agent\n      socket: /run/user/1000/agent.sock",

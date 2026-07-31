@@ -73,6 +73,23 @@ describe("hosts_list", () => {
     expect(registry.list().map((host) => host.alias)).toEqual(["Z", "a", "z", "ä"]);
   });
 
+  it("替换主机快照后立即返回新列表，并允许已移除主机的在途连接安全收尾", () => {
+    const registry = new HostRegistry([config.hosts[0]]);
+    let notifications = 0;
+    registry.subscribe(() => { notifications += 1; });
+    registry.connectionOpened("zeta");
+
+    registry.replace([{ ...config.hosts[0], alias: "replacement" }]);
+
+    expect(registry.list()).toEqual([
+      expect.objectContaining({ alias: "replacement", connectionState: "unknown" })
+    ]);
+    expect(registry.get("zeta")).toBeUndefined();
+    expect(() => registry.connectionClosed("zeta")).not.toThrow();
+    expect(registry.trackedConnectionState("zeta")).toBe("unknown");
+    expect(notifications).toBeGreaterThanOrEqual(2);
+  });
+
   it("hosts_list 反映并发连接引用、最后关闭与失败连接的当前状态", async () => {
     const registry = new HostRegistry(config.hosts);
     let attempt = 0;

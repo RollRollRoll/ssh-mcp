@@ -15,7 +15,7 @@ const inspectorProcesses = new Set<ControlledInspectorProcess>();
 const fixtureDirectories: string[] = [];
 const maxInspectorOutputBytes = 1024 * 1024;
 const expectedTools = [
-  "hosts_list", "command_run", "profile_run", "session_open", "session_write", "session_read",
+  "hosts_list", "config_reload", "command_run", "profile_run", "session_open", "session_write", "session_read",
   "session_resize", "session_close", "file_upload", "file_download", "operation_get", "operation_cancel"
 ].sort();
 
@@ -34,7 +34,7 @@ describe("MCP Inspector 协议验收", () => {
     for (const directory of fixtureDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
   });
 
-  testWithIds(["SC-001", "MN-004", "MN-005"], "AC-MCP-01：正式 MCP Inspector CLI 通过 stdio 发现精确 12 个工具并验证成功 structuredContent", async () => {
+  testWithIds(["SC-001", "MN-004", "MN-005"], "AC-MCP-01：正式 MCP Inspector CLI 通过 stdio 发现精确 13 个工具并验证成功 structuredContent", async () => {
     const fixture = await createFixture();
     const listed = await inspector(fixture.configPath, "tools/list");
     expect(listed.tools.map((tool: { name: string }) => tool.name).sort()).toEqual(expectedTools);

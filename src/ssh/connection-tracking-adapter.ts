@@ -21,19 +21,19 @@ export class ConnectionTrackingSshAdapter {
     try {
       connection = await this.adapter.connect(host, this.connectTimeoutMs, approvalRoute);
     } catch (error: unknown) {
-      const before = this.registry.connectionState(host.alias);
+      const before = this.registry.trackedConnectionState(host.alias);
       this.registry.connectionFailed(host.alias);
       this.emitActualState(host.alias, before);
       throw error;
     }
-    const beforeOpen = this.registry.connectionState(host.alias);
+    const beforeOpen = this.registry.trackedConnectionState(host.alias);
     this.registry.connectionOpened(host.alias);
     this.emitActualState(host.alias, beforeOpen);
     let closed = false;
     const markClosed = (): void => {
       if (closed) return;
       closed = true;
-      const beforeClose = this.registry.connectionState(host.alias);
+      const beforeClose = this.registry.trackedConnectionState(host.alias);
       this.registry.connectionClosed(host.alias);
       this.emitActualState(host.alias, beforeClose);
     };
@@ -57,7 +57,7 @@ export class ConnectionTrackingSshAdapter {
   }
 
   private emitActualState(host: string, previous: "unknown" | "connected" | "disconnected"): void {
-    const current = this.registry.connectionState(host);
+    const current = this.registry.trackedConnectionState(host);
     if (current !== previous && (current === "connected" || current === "disconnected")) {
       this.onStateChange?.(host, current);
     }

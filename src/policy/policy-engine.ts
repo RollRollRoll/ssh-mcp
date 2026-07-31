@@ -24,13 +24,16 @@ export function isVerifiedProfileMatch(value: unknown): value is VerifiedProfile
   return typeof value === "object" && value !== null && verifiedMatches.has(value);
 }
 
-/** 启动时冻结规则；匹配过程只有纯字符串和词法路径判断，绝不连接或审批。 */
+/** 每次装载时冻结规则；匹配过程只有纯字符串和词法路径判断，绝不连接或审批。 */
 export class PolicyEngine {
-  private readonly profilesById: ReadonlyMap<string, LowRiskProfile>;
+  private profilesById: ReadonlyMap<string, LowRiskProfile>;
 
   public constructor(profiles: readonly LowRiskProfile[]) {
-    const frozenProfiles = cloneAndFreeze(profiles);
-    this.profilesById = new Map(frozenProfiles.map((profile) => [profile.id, profile]));
+    this.profilesById = profilesMap(profiles);
+  }
+
+  public replace(profiles: readonly LowRiskProfile[]): void {
+    this.profilesById = profilesMap(profiles);
   }
 
   public hasProfile(profileId: string): boolean {
@@ -95,6 +98,11 @@ export class PolicyEngine {
         }
     }
   }
+}
+
+function profilesMap(profiles: readonly LowRiskProfile[]): ReadonlyMap<string, LowRiskProfile> {
+  const frozenProfiles = cloneAndFreeze(profiles);
+  return new Map(frozenProfiles.map((profile) => [profile.id, profile]));
 }
 
 function rejection(code: typeof ErrorCodes.POLICY_NOT_FOUND | typeof ErrorCodes.POLICY_REQUIRES_APPROVAL): PolicyDecision {

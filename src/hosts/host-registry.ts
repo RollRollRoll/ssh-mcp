@@ -9,7 +9,7 @@ export interface HostSummary {
 }
 
 export class HostRegistry {
-  private readonly hostsByAlias: ReadonlyMap<string, HostConfig>;
+  private hostsByAlias: ReadonlyMap<string, HostConfig>;
   private readonly connectionStates = new Map<string, ConnectionState>();
   private readonly activeConnections = new Map<string, number>();
   private readonly subscribers = new Set<() => void>();
@@ -35,6 +35,19 @@ export class HostRegistry {
       .sort((left, right) => compareAliases(left.alias, right.alias)));
   }
 
+  /** 原子替换后续操作使用的主机快照；已有连接继续按原快照收尾。 */
+  public replace(hosts: readonly HostConfig[]): void {
+    const entries = hosts.map((host) => [host.alias, cloneAndFreeze(host)] as const);
+    const replacement = new Map(entries);
+    this.hostsByAlias = replacement;
+    for (const alias of [...this.connectionStates.keys()]) {
+      if (!replacement.has(alias) && (this.activeConnections.get(alias) ?? 0) === 0) {
+        this.connectionStates.delete(alias);
+      }
+    }
+    this.notifySubscribers();
+  }
+
   public setConnectionState(alias: string, connectionState: ConnectionState): void {
     if (!this.hostsByAlias.has(alias)) {
       throw new Error(`未登记主机：${alias}`);
@@ -49,22 +62,29 @@ export class HostRegistry {
 
   public connectionState(alias: string): ConnectionState {
     this.assertRegistered(alias);
+    return this.trackedConnectionState(alias);
+  }
+
+  /** 供连接适配器处理配置重载期间已经在途或待关闭的旧连接。 */
+  public trackedConnectionState(alias: string): ConnectionState {
     return this.connectionStates.get(alias) ?? "unknown";
   }
 
   /** 连接状态只表示当前进程仍持有的活动连接，不把历史成功当作当前已连接。 */
   public connectionOpened(alias: string): void {
-    this.assertRegistered(alias);
     this.activeConnections.set(alias, (this.activeConnections.get(alias) ?? 0) + 1);
     this.updateConnectionState(alias, "connected");
   }
 
   public connectionClosed(alias: string): void {
-    this.assertRegistered(alias);
     const remaining = Math.max(0, (this.activeConnections.get(alias) ?? 0) - 1);
     if (remaining === 0) {
       this.activeConnections.delete(alias);
-      this.updateConnectionState(alias, "disconnected");
+      if (this.hostsByAlias.has(alias)) {
+        this.updateConnectionState(alias, "disconnected");
+      } else {
+        this.connectionStates.delete(alias);
+      }
     } else {
       this.activeConnections.set(alias, remaining);
       this.updateConnectionState(alias, "connected");
@@ -72,7 +92,7 @@ export class HostRegistry {
   }
 
   public connectionFailed(alias: string): void {
-    this.assertRegistered(alias);
+    if (!this.hostsByAlias.has(alias) && !this.activeConnections.has(alias)) return;
     if ((this.activeConnections.get(alias) ?? 0) === 0) {
       this.updateConnectionState(alias, "disconnected");
     }
@@ -81,6 +101,10 @@ export class HostRegistry {
   private updateConnectionState(alias: string, state: ConnectionState): void {
     if ((this.connectionStates.get(alias) ?? "unknown") === state) return;
     this.connectionStates.set(alias, state);
+    this.notifySubscribers();
+  }
+
+  private notifySubscribers(): void {
     for (const listener of [...this.subscribers]) {
       try { listener(); } catch { /* 控制台观察者不得影响连接引用计数。 */ }
     }

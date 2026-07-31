@@ -117,6 +117,8 @@ describe("MCP stdio 启动入口", () => {
     expect(existsSync(generatedPath)).toBe(true);
     expect(readFileSync(generatedPath, "utf8"))
       .toContain(`localRoots:\n  - ${JSON.stringify(realpathSync(workingDirectory))}`);
+    expect(readFileSync(generatedPath, "utf8"))
+      .toContain(`trustStore: ${JSON.stringify(join(homeDirectory, ".config", "ssh-mcp", "trust.json"))}`);
 
     const firstExited = new Promise<void>((resolve) => { first.once("exit", () => resolve()); });
     first.kill("SIGTERM");
@@ -181,6 +183,7 @@ describe("MCP stdio 启动入口", () => {
       result: {
         tools: expect.arrayContaining([
           expect.objectContaining({ name: "hosts_list" }),
+          expect.objectContaining({ name: "config_reload" }),
           expect.objectContaining({ name: "operation_get" }),
           expect.objectContaining({ name: "operation_cancel" }),
           expect.objectContaining({ name: "command_run" }),

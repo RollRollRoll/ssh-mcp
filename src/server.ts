@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ConfigLoader } from "./config/loader.js";
+import { ConfigError, ConfigLoader } from "./config/loader.js";
+import { ConfigRestartRequiredError, RuntimeConfigReloader } from "./config/runtime-config.js";
 import { HostRegistry } from "./hosts/host-registry.js";
 import { OperationManager } from "./operations/operation-manager.js";
 import { ApprovalService, McpApprovalClient } from "./approval/approval-service.js";
@@ -16,6 +17,7 @@ import { ConnectionTrackingSshAdapter } from "./ssh/connection-tracking-adapter.
 import { TrustStore } from "./ssh/trust-store.js";
 import { registerCommandRunTool, type CommandRunDependencies } from "./tools/command-run.js";
 import { registerHostsListTool } from "./tools/hosts-list.js";
+import { registerConfigReloadTool } from "./tools/config-reload.js";
 import { registerOperationControlTools } from "./tools/operation-control.js";
 import { registerProfileRunTool, type ProfileRunDependencies } from "./tools/profile-run.js";
 import { PolicyEngine } from "./policy/policy-engine.js";
@@ -129,9 +131,10 @@ export interface ServerRuntime {
 }
 
 export async function startServer(configPath = resolveConfigPath(), options: StartServerOptions = {}): Promise<ServerRuntime> {
+  const configLoader = new ConfigLoader(configPath);
   let config: ReturnType<ConfigLoader["load"]>;
   try {
-    config = new ConfigLoader(configPath).load();
+    config = configLoader.load();
   } catch (error: unknown) {
     (options.logger ?? new JsonLogger()).error(LogEvents.CONFIG_LOADED, {
       state: "failed",
@@ -267,6 +270,26 @@ export async function startServer(configPath = resolveConfigPath(), options: Sta
   manager.subscribe(() => revisions.invalidate("operations"));
   sessions.subscribe(() => revisions.invalidate("sessions"));
   approval.coordinator.subscribe(() => revisions.invalidate("approvals"));
+  const configReloader = new RuntimeConfigReloader(configLoader, config, registry, policy);
+  registerConfigReloadTool(server, {
+    reload: () => {
+      try {
+        const snapshot = configReloader.reload();
+        for (const host of registry.list()) knownHosts.add(host.alias);
+        revisions.invalidate("profiles");
+        logger.info(LogEvents.CONFIG_LOADED, { state: "completed" });
+        return snapshot;
+      } catch (error: unknown) {
+        logger.error(LogEvents.CONFIG_LOADED, {
+          state: "failed",
+          errorCode: error instanceof ConfigRestartRequiredError
+            ? ErrorCodes.CONFIG_RESTART_REQUIRED
+            : error instanceof ConfigError ? ErrorCodes.CONFIG_INVALID : ErrorCodes.INTERNAL_ERROR
+        });
+        throw error;
+      }
+    }
+  });
   const consoleAuth = new ConsoleAuthGuard();
   const projector = new RuntimeSnapshotProjector({
     instanceId: consoleAuth.instanceId,

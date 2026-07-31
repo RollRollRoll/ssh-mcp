@@ -1,8 +1,10 @@
 # 配置说明
 
-服务只读取一份 YAML 1.2 配置。配置在启动时校验并深冻结；不支持 YAML 锚点、别名或标签。除 `privateKeyFile.path` 可使用 `~/.ssh/...` 外，所有路径必须是绝对路径；任何路径都不得包含 `..`。主机环境只能是 `development` 或 `test`，主机数量为 1–10 台。
+服务只读取一份 YAML 1.2 配置。配置在启动或调用 `config_reload` 时校验并深冻结；不支持 YAML 锚点、别名或标签。除 `privateKeyFile.path` 可使用 `~/.ssh/...` 外，所有路径必须是绝对路径；任何路径都不得包含 `..`。主机环境只能是 `development` 或 `test`，主机数量为 1–10 台。
 
-无参数启动时，服务固定加载 `~/.config/ssh-mcp/ssh-mcp.yml`。如果该文件不存在，服务会创建父目录，并以仅当前用户可读写的方式生成一份模板，输出 `config.generated` 后在同一次启动中继续完成 MCP 初始化；生成过程绝不覆盖已有文件。模板中的 `localRoots` 默认为本次启动的工作目录。填写模板并重启后，实际 SSH 操作会使用更新后的配置。
+无参数启动时，服务固定加载 `~/.config/ssh-mcp/ssh-mcp.yml`。如果该文件不存在，服务会创建父目录，并以仅当前用户可读写的方式生成一份模板，输出 `config.generated` 后在同一次启动中继续完成 MCP 初始化；生成过程绝不覆盖已有文件。模板中的 `localRoots` 默认为本次启动的工作目录，`trustStore` 默认为配置同目录的 `~/.config/ssh-mcp/trust.json`。填写模板并调用 `config_reload` 后，新的主机与低风险 Profile 会用于后续操作。
+
+`config_reload` 不接收路径或配置内容，只会重新读取进程启动时确定的同一文件。重载成功会原子替换 `hosts` 与 `lowRiskProfiles`；已经开始的操作继续使用此前取得的冻结快照。文件读取或校验失败会返回 `CONFIG_INVALID` 并保留旧快照，修正文件后可以再次调用。`trustStore`、`localRoots` 或 `limits` 属于进程级装配，发生变化时返回 `CONFIG_RESTART_REQUIRED`，旧配置仍然有效，需重启服务后应用这些字段。
 
 只有需要使用其他配置文件时，才通过 `--config <path>` 或 `SSH_MCP_CONFIG` 覆盖默认位置。路径必须是绝对路径，或使用以 `~/` 开头的当前服务用户主目录路径；只展开开头的 `~/`，不执行 Shell 变量、命令或通配符展开。
 
@@ -80,7 +82,7 @@ lowRiskProfiles:
 
 ## 主机身份与 TOFU
 
-`trustStore` 是服务写入已确认主机公钥指纹的本地文件。首次连接时，支持 form elicitation 的 MCP 客户端会展示别名、算法和指纹，由用户确认后才认证；拒绝、超时或客户端不支持表单时都不会认证。以后指纹变化会关闭拒绝，不能通过配置或本次任务临时覆盖。
+`trustStore` 是服务写入已确认主机公钥指纹的本地文件。默认模板将它设置为与配置文件同目录的 `trust.json`，即默认配置对应 `~/.config/ssh-mcp/trust.json`；文件会在首次接受未知主机密钥时创建。首次连接时，支持 form elicitation 的 MCP 客户端会展示别名、算法和指纹，由用户确认后才认证；拒绝、超时或客户端不支持表单时都不会认证。以后指纹变化会关闭拒绝，不能通过配置或本次任务临时覆盖。
 
 ## 根目录、Profile 与预算
 

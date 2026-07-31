@@ -47,7 +47,7 @@ npm publish --access public
 
 ### 首次生成配置
 
-如果既没有传入 `--config`，也没有设置 `SSH_MCP_CONFIG`，服务会加载 `~/.config/ssh-mcp/ssh-mcp.yml`。首次启动时如果该文件不存在，服务会创建父目录和配置模板，输出一次 `config.generated` 事件，并在同一次启动中继续完成 MCP 初始化。生成过程不会覆盖已有文件；模板中的 `localRoots` 默认为本次启动的工作目录。实际执行 SSH 操作前，请编辑模板中的主机地址、用户名、认证方式和远程根目录，然后重启服务使配置生效。
+如果既没有传入 `--config`，也没有设置 `SSH_MCP_CONFIG`，服务会加载 `~/.config/ssh-mcp/ssh-mcp.yml`。首次启动时如果该文件不存在，服务会创建父目录和配置模板，输出一次 `config.generated` 事件，并在同一次启动中继续完成 MCP 初始化。生成过程不会覆盖已有文件；模板中的 `localRoots` 默认为本次启动的工作目录，`trustStore` 默认为配置同目录下的 `~/.config/ssh-mcp/trust.json`。实际执行 SSH 操作前，请编辑模板中的主机地址、用户名、认证方式和远程根目录，然后调用 `config_reload` 使主机与低风险 Profile 配置生效。
 
 省略配置参数的线上包启动形式如下：
 
@@ -117,11 +117,11 @@ MCP Elicitation 只能取得用户对启用控制台的同意，不能提升 Cod
 
 客户端需要支持 MCP `2025-11-25`、stdio 和工具调用；支持 form elicitation 时，首次工具调用可以询问是否启用控制台，后续风险审批也可直接在 MCP 客户端处理；同时支持 URL elicitation 时，控制台就绪后可在用户二次同意下直接交给本机浏览器打开。`hosts_list` 不需要业务审批，但首次调用仍会触发一次控制台启用询问。客户端不支持 form elicitation 时不会启动控制台；只缺少 URL elicitation 时，控制台地址会通过首次工具结果的 `_sshMcp.console.accessUrl` 返回。需要审批的操作无人决定则保守超时，绝不会提前执行。网页来源操作只在网页审批，不会向 MCP 客户端制造无对应工具上下文的审批。
 
-服务固定提供 12 个工具：`hosts_list`、`command_run`、`profile_run`、`session_open`、`session_write`、`session_read`、`session_resize`、`session_close`、`file_upload`、`file_download`、`operation_get`、`operation_cancel`。长操作应使用后两个工具查询进度和请求取消。
+服务固定提供 13 个工具：`hosts_list`、`config_reload`、`command_run`、`profile_run`、`session_open`、`session_write`、`session_read`、`session_resize`、`session_close`、`file_upload`、`file_download`、`operation_get`、`operation_cancel`。编辑 YAML 后调用无参数的 `config_reload`，会重新校验文件并原子替换 `hosts` 与 `lowRiskProfiles`；解析失败时继续使用旧快照。`trustStore`、`localRoots` 或 `limits` 变化会返回 `CONFIG_RESTART_REQUIRED`，必须重启进程后生效。长操作应使用最后两个工具查询进度和请求取消。
 
 ## 安全边界
 
-主机、账号、认证方式、Shell、根目录和低风险 Profile 都在启动时从 YAML 加载并冻结。首次连接使用 TOFU 表单确认主机密钥；指纹发生变化时一律拒绝，不能在任务内绕过。文件和目录操作只允许配置根内的普通文件/目录，并拒绝链接、重解析点和目录树内挂载点。
+主机、账号、认证方式、Shell、远程根目录和低风险 Profile 从 YAML 加载并冻结成不可变快照；`config_reload` 只会为后续新操作原子替换该快照，已有操作继续使用启动时取得的快照。首次连接使用 TOFU 表单确认主机密钥；指纹发生变化时一律拒绝，不能在任务内绕过。文件和目录操作只允许配置根内的普通文件/目录，并拒绝链接、重解析点和目录树内挂载点。
 
 完整配置及默认预算见 [配置说明](docs/configuration.md)。
 
